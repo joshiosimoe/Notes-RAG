@@ -89,3 +89,97 @@ def test_empty_note_yields_no_chunks():
 
 def test_frontmatter_only_note_yields_no_chunks():
     assert chunk_markdown("---\ntitle: X\n---\n", source_path=PATH, vault_id=VAULT) == []
+
+
+def test_heading_splitting_produces_distinct_chunks_with_correct_headings():
+    """Verify that section headings are correctly captured and that chunks don't merge.
+
+    Sections are sized > 150 tokens (600+ chars) to force normalize() to leave them
+    separate. This test would fail if _split_on_headings were replaced with a no-op
+    like 'return [(None, body.strip())]'.
+    """
+    # Preamble: 600+ chars so it survives as its own chunk
+    preamble = (
+        "This is the introductory content before any heading. "
+        "It provides important context about the document. "
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit, "
+        "sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+        "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris. "
+        "Nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit. "
+        "In voluptate velit esse cillum dolore eu fugiat nulla pariatur. "
+        "Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt. "
+        "This preamble contains a unique marker: PREAMBLE_ONLY_MARKER_12345. "
+        "Additional text to ensure sufficient length for this section. "
+    )
+
+    # Section 1: Filtering phase, 600+ chars with unique marker
+    filtering = (
+        "## Filtering Phase\n\n"
+        "This section discusses the filtering phase in detail. "
+        "The scheduler removes nodes that cannot host the pod. "
+        "Various constraints are evaluated during this phase. "
+        "This includes CPU, memory, storage, and network requirements. "
+        "Affinity and anti-affinity rules are checked here. "
+        "Node selectors and taints are processed in this phase. "
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit, "
+        "sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+        "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris. "
+        "Nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit. "
+        "The filtering phase contains a unique marker: FILTERING_PHASE_MARKER_67890. "
+        "Additional content specific to filtering logic goes here. "
+    )
+
+    # Section 2: Scoring phase, 600+ chars with unique marker
+    scoring = (
+        "## Scoring Phase\n\n"
+        "This section explains the scoring phase in detail. "
+        "Remaining nodes are ranked according to priority weights. "
+        "Multiple scoring functions can be used to rank nodes. "
+        "The highest-scoring node is selected to host the pod. "
+        "Different metrics can influence the scoring process. "
+        "Custom scoring plugins can be integrated here. "
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit, "
+        "sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+        "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris. "
+        "Nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit. "
+        "The scoring phase contains a unique marker: SCORING_PHASE_MARKER_54321. "
+        "Additional details about scoring algorithms and implementation. "
+    )
+
+    note_text = f"{preamble}\n\n{filtering}\n\n{scoring}"
+
+    chunks = chunk_markdown(note_text, source_path=PATH, vault_id=VAULT)
+
+    # Should have 3 separate chunks (not merged) because each is large enough
+    assert len(chunks) == 3, f"Expected 3 chunks, got {len(chunks)}"
+
+    # Preamble chunk should have heading=None
+    preamble_chunk = chunks[0]
+    assert preamble_chunk.heading is None, "Preamble chunk should have heading=None"
+    assert "PREAMBLE_ONLY_MARKER_12345" in preamble_chunk.text
+
+    # Filtering chunk should have the correct heading
+    filtering_chunk = chunks[1]
+    assert filtering_chunk.heading == "Filtering Phase", (
+        f"Expected heading 'Filtering Phase', got '{filtering_chunk.heading}'"
+    )
+    assert "FILTERING_PHASE_MARKER_67890" in filtering_chunk.text
+    assert "PREAMBLE_ONLY_MARKER_12345" not in filtering_chunk.text, (
+        "Filtering chunk shouldn't contain preamble marker"
+    )
+    assert "SCORING_PHASE_MARKER_54321" not in filtering_chunk.text, (
+        "Filtering chunk shouldn't contain scoring marker"
+    )
+
+    # Scoring chunk should have the correct heading
+    scoring_chunk = chunks[2]
+    assert scoring_chunk.heading == "Scoring Phase", (
+        f"Expected heading 'Scoring Phase', got '{scoring_chunk.heading}'"
+    )
+    assert "SCORING_PHASE_MARKER_54321" in scoring_chunk.text
+    assert "PREAMBLE_ONLY_MARKER_12345" not in scoring_chunk.text, (
+        "Scoring chunk shouldn't contain preamble marker"
+    )
+    assert "FILTERING_PHASE_MARKER_67890" not in scoring_chunk.text, (
+        "Scoring chunk shouldn't contain filtering marker"
+    )
