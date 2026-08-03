@@ -159,3 +159,28 @@ def test_reopening_the_file_preserves_data(tmp_path):
 def test_upsert_rejects_mismatched_lengths(store):
     with pytest.raises(ValueError):
         store.upsert([make_chunk("a", "p1.json")], [])
+
+
+def test_upsert_rejects_a_vector_of_the_wrong_dimensionality_and_writes_nothing(store):
+    with pytest.raises(ValueError):
+        store.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0]])
+    assert store.all_source_paths() == set()
+    assert store.search([1.0, 0.0, 0.0, 0.0], k=10) == []
+
+
+def test_failed_batch_does_not_leak_into_a_later_successful_upsert(store):
+    with pytest.raises(ValueError):
+        store.upsert(
+            [make_chunk("a", "p1.json"), make_chunk("b", "p2.json")],
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        )
+    store.upsert([make_chunk("c", "p3.json")], [[0.0, 0.0, 1.0, 0.0]])
+    assert store.all_source_paths() == {"p3.json"}
+
+
+def test_upsert_replace_leaves_no_orphaned_vector_row(store):
+    store.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
+    store.upsert([make_chunk("a", "p1.json")], [[0.0, 1.0, 0.0, 0.0]])
+    chunk_count = store._db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    vec_count = store._db.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0]
+    assert vec_count == chunk_count

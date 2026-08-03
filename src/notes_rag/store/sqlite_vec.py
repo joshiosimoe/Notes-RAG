@@ -69,37 +69,44 @@ class SqliteVecStore:
             raise ValueError(
                 f"chunks and vectors must be the same length; got {len(chunks)} and {len(vectors)}"
             )
+        # Validate every pair before issuing any write, so a malformed batch
+        # raises without touching the database at all.
         for chunk, vector in zip(chunks, vectors, strict=True):
             if len(vector) != self.dimensions:
                 raise ValueError(
                     f"vector for {chunk.id} has {len(vector)} dimensions, "
                     f"expected {self.dimensions}"
                 )
-            self._delete_ids([chunk.id])
-            cursor = self._db.execute(
-                f"INSERT INTO chunks ({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    chunk.id,
-                    chunk.corpus,
-                    chunk.vault_id,
-                    chunk.source_path,
-                    chunk.chunk_type,
-                    chunk.title,
-                    chunk.heading,
-                    chunk.context,
-                    chunk.text,
-                    chunk.content_hash,
-                    chunk.video_id,
-                    chunk.start_seconds,
-                    chunk.url,
-                    json.dumps(list(chunk.links_to)),
-                    json.dumps(list(chunk.backlinks)),
-                ),
-            )
-            self._db.execute(
-                "INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)",
-                (cursor.lastrowid, sqlite_vec.serialize_float32(list(vector))),
-            )
+        try:
+            for chunk, vector in zip(chunks, vectors, strict=True):
+                self._delete_ids([chunk.id])
+                cursor = self._db.execute(
+                    f"INSERT INTO chunks ({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        chunk.id,
+                        chunk.corpus,
+                        chunk.vault_id,
+                        chunk.source_path,
+                        chunk.chunk_type,
+                        chunk.title,
+                        chunk.heading,
+                        chunk.context,
+                        chunk.text,
+                        chunk.content_hash,
+                        chunk.video_id,
+                        chunk.start_seconds,
+                        chunk.url,
+                        json.dumps(list(chunk.links_to)),
+                        json.dumps(list(chunk.backlinks)),
+                    ),
+                )
+                self._db.execute(
+                    "INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)",
+                    (cursor.lastrowid, sqlite_vec.serialize_float32(list(vector))),
+                )
+        except Exception:
+            self._db.rollback()
+            raise
         self._db.commit()
 
     def delete_by_path(self, source_path: str) -> int:
