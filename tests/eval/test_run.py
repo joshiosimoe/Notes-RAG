@@ -1,5 +1,6 @@
 import pytest
 
+import eval.run as run_module
 from eval.run import Expectation, Question, evaluate, load_questions, matches
 from notes_rag.embed.fake import FakeEmbedder
 from notes_rag.models import Chunk
@@ -67,6 +68,49 @@ def test_matches_a_note_by_source_path():
     )
     expectation = Expectation(corpus="note", source_path="Class Notes/a.md")
     assert matches(hit(chunk), expectation)
+
+
+def test_does_not_match_a_different_corpus():
+    chunk = video_chunk("a", start=1120, text="x")
+    expectation = Expectation(corpus="note", video_id="vid", start_seconds=(1000, 1500))
+    assert not matches(hit(chunk), expectation)
+
+
+def test_does_not_match_a_different_source_path():
+    chunk = Chunk(
+        id="n",
+        corpus="note",
+        vault_id="V",
+        source_path="Class Notes/a.md",
+        chunk_type="note",
+        title="a",
+        heading=None,
+        context="CTX",
+        text="x",
+        content_hash="h",
+    )
+    expectation = Expectation(corpus="note", source_path="Class Notes/b.md")
+    assert not matches(hit(chunk), expectation)
+
+
+def test_does_not_match_when_chunk_has_no_start_seconds():
+    chunk = Chunk(
+        id="n",
+        corpus="video",
+        vault_id=None,
+        source_path="summaries/vid.json",
+        chunk_type="summary",
+        title="T",
+        heading="H",
+        context="CTX",
+        text="x",
+        content_hash="h",
+        video_id="vid",
+        start_seconds=None,
+        url="https://example.com",
+    )
+    expectation = Expectation(corpus="video", video_id="vid", start_seconds=(1000, 1500))
+    assert not matches(hit(chunk), expectation)
 
 
 def test_load_questions_parses_a_video_expectation(tmp_path):
@@ -174,3 +218,78 @@ def test_evaluate_with_no_questions_returns_zero(populated_store):
     report = evaluate([], store, embedder, k=2)
     assert report.recall_at_k == 0.0
     assert report.mrr == 0.0
+
+
+def _patch_titan_embedder(monkeypatch):
+    # main() imports TitanEmbedder lazily from notes_rag.embed.bedrock inside
+    # its own body. Patching the attribute on that module, rather than on
+    # eval.run, is what the lazy `from ... import TitanEmbedder` resolves at
+    # call time - this must never construct a real client or touch AWS.
+    from notes_rag.embed import bedrock as bedrock_module
+
+    monkeypatch.setattr(
+        bedrock_module, "TitanEmbedder", lambda *args, **kwargs: FakeEmbedder(dimensions=DIMS)
+    )
+
+
+def _write_main_index_and_questions(tmp_path, *, start_seconds):
+    db_path = tmp_path / "eval.db"
+    store = SqliteVecStore(db_path, dimensions=DIMS)
+    embedder = FakeEmbedder(dimensions=DIMS)
+    chunks = [video_chunk("a", start=1120, text="writing a custom scheduler")]
+    store.upsert(chunks, embedder.embed([chunk.text for chunk in chunks]))
+    store.close()
+
+    questions_path = tmp_path / "q.yaml"
+    low, high = start_seconds
+    questions_path.write_text(
+        "- id: q1\n"
+        "  question: writing a custom scheduler\n"
+        "  expects:\n"
+        "    - corpus: video\n"
+        "      video_id: vid\n"
+        f"      start_seconds: [{low}, {high}]\n"
+    )
+    return db_path, questions_path
+
+
+def test_main_returns_nonzero_when_recall_is_below_min_recall(tmp_path, monkeypatch):
+    _patch_titan_embedder(monkeypatch)
+    # A span that cannot match the chunk's start_seconds=1120 forces a miss,
+    # so recall@k is 0.0 - below the 0.5 threshold.
+    db_path, questions_path = _write_main_index_and_questions(tmp_path, start_seconds=(9000, 9999))
+
+    exit_code = run_module.main(
+        [
+            "--index",
+            str(db_path),
+            "--questions",
+            str(questions_path),
+            "--k",
+            "2",
+            "--min-recall",
+            "0.5",
+        ]
+    )
+    assert exit_code == 1
+
+
+def test_main_returns_zero_when_recall_meets_min_recall(tmp_path, monkeypatch):
+    _patch_titan_embedder(monkeypatch)
+    # A span that matches the chunk's start_seconds=1120 forces a hit, so
+    # recall@k is 1.0 - at or above the 0.5 threshold.
+    db_path, questions_path = _write_main_index_and_questions(tmp_path, start_seconds=(1100, 1200))
+
+    exit_code = run_module.main(
+        [
+            "--index",
+            str(db_path),
+            "--questions",
+            str(questions_path),
+            "--k",
+            "2",
+            "--min-recall",
+            "0.5",
+        ]
+    )
+    assert exit_code == 0
