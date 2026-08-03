@@ -62,6 +62,16 @@ def build_index(chunks: Sequence[Chunk], store: VectorStore, embedder: Embedder)
     # would report a 0% reuse rate and re-embed the entire corpus every run.
     cached = store.cached_vectors({chunk.content_hash for chunk in chunks})
 
+    # Embed BEFORE any delete, too. embed() is the flaky, expensive step (a
+    # real Bedrock call can throttle or time out); if it raises, the store
+    # must still hold everything it held on entry — not be left emptied with
+    # no vectors to write back.
+    to_embed = [chunk for chunk in chunks if chunk.content_hash not in cached]
+    if to_embed:
+        fresh = embedder.embed([chunk.text for chunk in to_embed])
+        for chunk, vector in zip(to_embed, fresh, strict=True):
+            cached[chunk.content_hash] = vector
+
     stale_paths = store.all_source_paths() - incoming_paths
     paths_deleted = 0
     for path in stale_paths:
@@ -75,12 +85,6 @@ def build_index(chunks: Sequence[Chunk], store: VectorStore, embedder: Embedder)
 
     if not chunks:
         return BuildStats(0, 0, 0, paths_deleted)
-
-    to_embed = [chunk for chunk in chunks if chunk.content_hash not in cached]
-    if to_embed:
-        fresh = embedder.embed([chunk.text for chunk in to_embed])
-        for chunk, vector in zip(to_embed, fresh, strict=True):
-            cached[chunk.content_hash] = vector
 
     store.upsert(list(chunks), [cached[chunk.content_hash] for chunk in chunks])
 

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from notes_rag.embed.fake import FakeEmbedder
@@ -160,3 +162,66 @@ def test_backlinks_survive_a_build_round_trip(store, embedder):
     hits = store.search(embedder.embed(["two"])[0], k=10)
     beta = next(hit.chunk for hit in hits if hit.chunk.source_path == "Beta.md")
     assert beta.backlinks == ("Alpha",)
+
+
+def test_embed_failure_leaves_the_store_untouched(store, embedder):
+    """embed() is the flaky, expensive step (a real Bedrock call can throttle
+    or time out). If it raises mid-build, the store must still hold exactly
+    what it held on entry — not be left with stale/incoming paths already
+    deleted and nothing written back, which would force a full re-embed on
+    retry and defeat the cache (spec §3).
+    """
+    original = [note_chunk("a", "a.md", text="one"), note_chunk("b", "b.md", text="two")]
+    build_index(original, store, embedder)
+
+    class FailingEmbedder(FakeEmbedder):
+        def embed(self, texts):
+            raise RuntimeError("embedder unavailable")
+
+    with pytest.raises(RuntimeError):
+        build_index(
+            [note_chunk("a", "a.md", text="one"), note_chunk("b", "b.md", text="CHANGED")],
+            store,
+            FailingEmbedder(dimensions=DIMS),
+        )
+
+    assert store.all_source_paths() == {"a.md", "b.md"}
+    hits = store.search(embedder.embed(["two"])[0], k=10)
+    assert {hit.chunk.source_path for hit in hits} == {"a.md", "b.md"}
+
+
+def test_derive_backlinks_resolves_correctly_for_nested_paths():
+    chunks = [
+        note_chunk("a", "Class Notes/Alpha.md", text="one", links=("Beta",)),
+        note_chunk("b", "Class Notes/Beta.md", text="two"),
+    ]
+    out = derive_backlinks(chunks)
+    beta = next(chunk for chunk in out if chunk.source_path == "Class Notes/Beta.md")
+    assert beta.backlinks == ("Alpha",)
+
+
+def test_stem_collision_merges_backlinks_across_folders_known_limitation():
+    """Known limitation, not a bug: derive_backlinks matches wikilink targets
+    against source-path STEM only, by design, because wikilinks name a note,
+    not a path. Two notes that share a filename in different folders
+    therefore collapse into the same inbound bucket and receive an identical
+    `backlinks` tuple. `backlinks` is not read by retrieval in v1, so this is
+    an accepted side effect of stem matching. Disambiguating by folder would
+    be a deliberate future change, not something this test asks for.
+    """
+    chunks = [
+        note_chunk("a1", "Class Notes/Alpha.md", text="one"),
+        note_chunk("a2", "Work/Alpha.md", text="two"),
+        note_chunk("g", "Gamma.md", text="three", links=("Alpha",)),
+    ]
+    out = derive_backlinks(chunks)
+    class_alpha = next(c for c in out if c.source_path == "Class Notes/Alpha.md")
+    work_alpha = next(c for c in out if c.source_path == "Work/Alpha.md")
+    assert class_alpha.backlinks == ("Gamma",)
+    assert work_alpha.backlinks == ("Gamma",)
+
+
+def test_derive_backlinks_replaces_existing_backlinks_with_empty_when_nothing_links():
+    stale = replace(note_chunk("a", "Alpha.md", text="one"), backlinks=("Stale",))
+    out = derive_backlinks([stale])
+    assert out[0].backlinks == ()
