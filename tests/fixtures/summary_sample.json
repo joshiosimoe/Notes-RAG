@@ -1,0 +1,31 @@
+{
+  "video_id": "dQw4w9WgXcQ",
+  "title": "How Kubernetes Scheduling Actually Works",
+  "channel": "Some Channel",
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "published_at": "2026-07-01T12:00:00Z",
+  "duration_seconds": 3862,
+  "summarized_at": "2026-07-22",
+  "note_path": "Video Vault/2026/How Kubernetes Scheduling Actually Works-dQw4w9WgXcQ.md",
+  "summary": {
+    "verdict": "Worth watching if you operate clusters at scale.",
+    "tldr": "Walks through the default scheduler, then builds a custom one.",
+    "takeaways": [
+      "The scheduler is two phases: filtering and scoring.",
+      "Custom schedulers register via the scheduler name field on the pod spec."
+    ],
+    "sections": [
+      {
+        "start_seconds": 0,
+        "title": "Introduction",
+        "summary": "Sets up why scheduling matters once clusters get heterogeneous."
+      },
+      {
+        "start_seconds": 1120,
+        "title": "Custom scheduler",
+        "summary": "Implements a scheduler that packs pods onto the fewest nodes."
+      }
+    ],
+    "tags": ["kubernetes"]
+  }
+}

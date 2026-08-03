@@ -1,0 +1,23 @@
+# Golden questions, anchored on SOURCE SPAN rather than chunk ID.
+#
+# Chunk IDs are a function of chunking config, so anchoring on them would
+# invalidate this file every time chunking changes - which is the main thing
+# it exists to measure. A retrieved chunk counts as a hit when its
+# start_seconds falls inside the expected range, or its source_path matches.
+#
+# Replace the placeholder video_id and spans below with values read off the two
+# real artifacts in the Video Vault bucket before running this for real.
+
+- id: q001
+  question: How does a custom Kubernetes scheduler get registered?
+  expects:
+    - corpus: video
+      video_id: REPLACE_WITH_REAL_VIDEO_ID
+      start_seconds: [1120, 1400]
+
+- id: q002
+  question: What are the two phases of Kubernetes scheduling?
+  expects:
+    - corpus: video
+      video_id: REPLACE_WITH_REAL_VIDEO_ID
+      start_seconds: [0, 1120]
