@@ -1,0 +1,26 @@
+{
+  "video_id": "dQw4w9WgXcQ",
+  "language": "en",
+  "segments": [
+    {
+      "start_seconds": 0,
+      "text": "Welcome back to the channel. If you are new here, we spend most of our time digging into the internals of the systems we use every day instead of just skimming the surface. Today's video is going to be one of the deeper ones, so grab a coffee and settle in, because we are going to go from the basics all the way down into a hands-on implementation by the end."
+    },
+    {
+      "start_seconds": 12,
+      "text": "Today we are looking at the Kubernetes scheduler. Specifically we want to understand how the default scheduler decides which node a new pod should land on, what signals it takes into account, and why that process sometimes surprises people who are used to simpler orchestration tools. Along the way we will touch on taints, tolerations, and affinity rules, since those all feed into the same decision."
+    },
+    {
+      "start_seconds": 600,
+      "text": "Filtering removes nodes that cannot host the pod. This is the first of the two phases the scheduler runs through, and it is essentially a hard elimination step: any node that fails a predicate, whether that is insufficient CPU, a port conflict, or a taint the pod does not tolerate, gets dropped from consideration entirely. Only once the candidate set has been narrowed down does the scheduler move on to scoring, which we will cover in the next section."
+    },
+    {
+      "start_seconds": 1120,
+      "text": "Now let us write our own scheduler from scratch. We are going to build a minimal custom scheduler in Go that watches for unscheduled pods matching a specific scheduler name, picks a node using a simple heuristic that favors the least loaded machine, and then binds the pod to that node using the standard Kubernetes API. This will not replace the default scheduler, but it will show you exactly what is happening under the hood when a pod gets placed."
+    },
+    {
+      "start_seconds": 1400,
+      "text": "We register it by setting schedulerName on the pod spec. Once that field points at our custom scheduler instead of the default one, the default scheduler will simply ignore the pod and leave it pending, which gives our code a chance to pick it up, run its own filtering and scoring logic, and then create a binding object that tells the API server which node the pod should run on."
+    }
+  ]
+}
