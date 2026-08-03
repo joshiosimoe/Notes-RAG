@@ -1,3 +1,5 @@
+import struct
+
 import pytest
 
 from notes_rag.models import Chunk
@@ -105,6 +107,57 @@ def test_delete_by_path_on_unknown_path_returns_zero(store):
     assert store.delete_by_path("nope.json") == 0
 
 
+def test_replace_deletes_stale_paths_and_inserts_new_chunks_in_one_call(store):
+    store.upsert(
+        [make_chunk("a", "p1.json"), make_chunk("b", "p2.json")],
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+    )
+    deleted = store.replace(
+        ["p1.json"],
+        [make_chunk("c", "p3.json")],
+        [[0.0, 0.0, 1.0, 0.0]],
+    )
+    assert deleted == 1
+    assert store.all_source_paths() == {"p2.json", "p3.json"}
+
+
+def test_replace_with_a_delete_path_that_does_not_exist_returns_zero(store):
+    assert store.replace(["nope.json"], [], []) == 0
+
+
+def test_replace_rejects_a_vector_of_the_wrong_dimensionality_and_deletes_nothing(store):
+    """The pre-write validation must run before the deletes, not just before
+    the inserts: this is the fix for the CRITICAL finding, where the old
+    build_index deleted paths in a separate, already-committed transaction
+    before ever reaching upsert's own validation.
+    """
+    store.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
+    with pytest.raises(ValueError):
+        store.replace(["p1.json"], [make_chunk("b", "p2.json")], [[1.0, 0.0, 0.0]])
+    assert store.all_source_paths() == {"p1.json"}
+
+
+def test_replace_rolls_back_the_delete_when_the_write_loop_fails_partway(store):
+    """Direct store-level proof of the CRITICAL fix: a delete_path and a
+    later insert in the same replace() call must live or die together. Here
+    the delete of p1.json and the insert of p2.json both happen inside the
+    same uncommitted transaction as the failing p3.json insert - rollback()
+    must undo all three, leaving the store exactly as it was before the call.
+    """
+    store.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
+
+    with pytest.raises(struct.error):
+        store.replace(
+            ["p1.json"],
+            [make_chunk("b", "p2.json"), make_chunk("c", "p3.json")],
+            [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, "oops"]],
+        )
+
+    assert store.all_source_paths() == {"p1.json"}
+    hits = store.search([1.0, 0.0, 0.0, 0.0], k=10)
+    assert [hit.chunk.id for hit in hits] == ["a"]
+
+
 def test_cached_vectors_returns_known_hashes_only(store):
     store.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
     cached = store.cached_vectors({"hash-a", "hash-missing"})
@@ -178,9 +231,66 @@ def test_failed_batch_does_not_leak_into_a_later_successful_upsert(store):
     assert store.all_source_paths() == {"p3.json"}
 
 
+def test_a_failure_inside_the_write_loop_rolls_back_the_whole_batch(store):
+    """The two tests above only exercise the pre-write validation loop -
+    a wrong-length vector is rejected before `_delete_ids`/INSERT ever runs,
+    so `try` is never entered. This one passes pre-write validation (correct
+    length) but fails inside the write loop itself, on the second chunk -
+    after the first chunk's DELETE and INSERT have already executed inside
+    the same uncommitted transaction - proving `rollback()` undoes writes
+    that already happened, not just ones that were about to.
+    """
+    store.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
+
+    with pytest.raises(struct.error):
+        store.upsert(
+            [make_chunk("b", "p2.json"), make_chunk("c", "p3.json")],
+            [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, "oops"]],
+        )
+
+    assert store.all_source_paths() == {"p1.json"}
+    chunk_count = store._db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    vec_count = store._db.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0]
+    assert chunk_count == vec_count == 1
+
+
 def test_upsert_replace_leaves_no_orphaned_vector_row(store):
     store.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
     store.upsert([make_chunk("a", "p1.json")], [[0.0, 1.0, 0.0, 0.0]])
     chunk_count = store._db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
     vec_count = store._db.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0]
     assert vec_count == chunk_count
+
+
+def test_opening_an_existing_database_with_a_mismatched_width_raises(tmp_path):
+    path = tmp_path / "mismatch.db"
+    first = SqliteVecStore(path, dimensions=DIMS)
+    first.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
+    first.close()
+
+    with pytest.raises(ValueError, match=r"4 dimensions.*dimensions=1024"):
+        SqliteVecStore(path)  # default dimensions=1024, but the file holds DIMS=4
+
+
+def test_mismatched_width_error_does_not_corrupt_the_file(tmp_path):
+    path = tmp_path / "mismatch.db"
+    first = SqliteVecStore(path, dimensions=DIMS)
+    first.upsert([make_chunk("a", "p1.json")], [[1.0, 0.0, 0.0, 0.0]])
+    first.close()
+
+    with pytest.raises(ValueError):
+        SqliteVecStore(path, dimensions=DIMS + 1)
+
+    reopened = SqliteVecStore(path, dimensions=DIMS)
+    try:
+        assert reopened.all_source_paths() == {"p1.json"}
+    finally:
+        reopened.close()
+
+
+def test_opening_a_fresh_database_with_any_width_does_not_raise(tmp_path):
+    store = SqliteVecStore(tmp_path / "fresh.db", dimensions=1024)
+    try:
+        assert store.dimensions == 1024
+    finally:
+        store.close()

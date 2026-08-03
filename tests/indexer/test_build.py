@@ -190,6 +190,39 @@ def test_embed_failure_leaves_the_store_untouched(store, embedder):
     assert {hit.chunk.source_path for hit in hits} == {"a.md", "b.md"}
 
 
+def test_upsert_failure_leaves_the_store_untouched(store, embedder):
+    """Regression test for the CRITICAL finding: the old build_index deleted
+    every stale path AND every incoming path (each delete committing on its
+    own, since delete_by_path commits) before ever calling upsert. A failure
+    inside upsert's own validation - e.g. a fresh vector of the wrong width -
+    rolled back only the insert, leaving the deletes durable and the store
+    completely empty. This must fail against the pre-fix code: `after`
+    should differ from `before` there (empty set vs. two paths).
+    """
+    original = [note_chunk("a", "a.md", text="one"), note_chunk("b", "b.md", text="two")]
+    build_index(original, store, embedder)
+    before = store.all_source_paths()
+    assert before == {"a.md", "b.md"}
+
+    class WrongWidthEmbedder(FakeEmbedder):
+        def embed(self, texts):
+            # One dimension short of what the store expects - trips the
+            # write path's dimension validation, not the embed() call itself.
+            return [vector[:-1] for vector in super().embed(texts)]
+
+    with pytest.raises(ValueError):
+        build_index(
+            [note_chunk("a", "a.md", text="one"), note_chunk("b", "b.md", text="CHANGED")],
+            store,
+            WrongWidthEmbedder(dimensions=DIMS),
+        )
+
+    after = store.all_source_paths()
+    assert after == before == {"a.md", "b.md"}
+    hits = store.search(embedder.embed(["two"])[0], k=10)
+    assert {hit.chunk.source_path for hit in hits} == {"a.md", "b.md"}
+
+
 def test_derive_backlinks_resolves_correctly_for_nested_paths():
     chunks = [
         note_chunk("a", "Class Notes/Alpha.md", text="one", links=("Beta",)),

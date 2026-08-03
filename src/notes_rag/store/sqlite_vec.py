@@ -6,6 +6,7 @@ milliseconds, so no ANN tuning is required.
 """
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -58,11 +59,37 @@ class SqliteVecStore:
         sqlite_vec.load(self._db)
         self._db.enable_load_extension(False)
         self._db.executescript(_SCHEMA)
+
+        existing = self._existing_vec_dimensions()
+        if existing is not None and existing != dimensions:
+            self._db.close()
+            raise ValueError(
+                f"{self.path} already holds vec_chunks with {existing} dimensions, "
+                f"but SqliteVecStore was opened with dimensions={dimensions}"
+            )
+
         self._db.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks "
             f"USING vec0(embedding float[{dimensions}])"
         )
         self._db.commit()
+
+    def _existing_vec_dimensions(self) -> int | None:
+        """The declared width of an already-existing vec_chunks table, if any.
+
+        `CREATE VIRTUAL TABLE IF NOT EXISTS` silently no-ops when the table
+        is already there, so opening a store with a `dimensions` argument
+        that disagrees with what's on disk would otherwise go undetected:
+        `self.dimensions` would hold the new value while the physical table
+        keeps its original width, until a later read or write mismatches.
+        """
+        row = self._db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_chunks'"
+        ).fetchone()
+        if row is None:
+            return None
+        match = re.search(r"float\[(\d+)\]", row[0])
+        return int(match.group(1)) if match else None
 
     def upsert(self, chunks: Sequence[Chunk], vectors: Sequence[Sequence[float]]) -> None:
         if len(chunks) != len(vectors):
@@ -117,6 +144,70 @@ class SqliteVecStore:
         self._delete_ids(ids)
         self._db.commit()
         return len(ids)
+
+    def replace(
+        self,
+        delete_paths: Iterable[str],
+        chunks: Sequence[Chunk],
+        vectors: Sequence[Sequence[float]],
+    ) -> int:
+        if len(chunks) != len(vectors):
+            raise ValueError(
+                f"chunks and vectors must be the same length; got {len(chunks)} and {len(vectors)}"
+            )
+        # Validate every pair before issuing any write - same pre-write
+        # contract as upsert() - so a malformed batch raises before the
+        # deletes below ever run, let alone commit.
+        for chunk, vector in zip(chunks, vectors, strict=True):
+            if len(vector) != self.dimensions:
+                raise ValueError(
+                    f"vector for {chunk.id} has {len(vector)} dimensions, "
+                    f"expected {self.dimensions}"
+                )
+
+        paths = list(delete_paths)
+        try:
+            paths_deleted = 0
+            for path in paths:
+                rows = self._db.execute(
+                    "SELECT id FROM chunks WHERE source_path = ?", (path,)
+                ).fetchall()
+                ids = [row[0] for row in rows]
+                if ids:
+                    paths_deleted += 1
+                self._delete_ids(ids)
+
+            for chunk, vector in zip(chunks, vectors, strict=True):
+                self._delete_ids([chunk.id])
+                cursor = self._db.execute(
+                    f"INSERT INTO chunks ({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        chunk.id,
+                        chunk.corpus,
+                        chunk.vault_id,
+                        chunk.source_path,
+                        chunk.chunk_type,
+                        chunk.title,
+                        chunk.heading,
+                        chunk.context,
+                        chunk.text,
+                        chunk.content_hash,
+                        chunk.video_id,
+                        chunk.start_seconds,
+                        chunk.url,
+                        json.dumps(list(chunk.links_to)),
+                        json.dumps(list(chunk.backlinks)),
+                    ),
+                )
+                self._db.execute(
+                    "INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)",
+                    (cursor.lastrowid, sqlite_vec.serialize_float32(list(vector))),
+                )
+        except Exception:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return paths_deleted
 
     def search(
         self,

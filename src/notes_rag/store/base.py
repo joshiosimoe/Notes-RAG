@@ -21,6 +21,23 @@ class VectorStore(Protocol):
     def delete_by_path(self, source_path: str) -> int:
         """Delete every chunk for a source path. Returns the number deleted."""
 
+    def replace(
+        self,
+        delete_paths: Iterable[str],
+        chunks: Sequence[Chunk],
+        vectors: Sequence[Sequence[float]],
+    ) -> int:
+        """Delete `delete_paths` and upsert `chunks`/`vectors` as one atomic write.
+
+        Both the deletes and the inserts land, or neither does: every vector
+        is validated against the store's dimensionality before any row is
+        touched, and any exception during the write - a bad vector that slips
+        past validation, a locked database, disk full - triggers a full
+        `rollback()` before re-raising. The store is left exactly as it was
+        on entry; it is never partially emptied. Returns the number of
+        `delete_paths` that had at least one chunk deleted.
+        """
+
     def search(
         self,
         vector: Sequence[float],

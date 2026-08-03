@@ -72,21 +72,26 @@ def build_index(chunks: Sequence[Chunk], store: VectorStore, embedder: Embedder)
         for chunk, vector in zip(to_embed, fresh, strict=True):
             cached[chunk.content_hash] = vector
 
+    # Every path in stale_paths came straight out of all_source_paths(), so
+    # each one is guaranteed to currently exist - paths_deleted counts them
+    # directly rather than trusting replace()'s return value, which also
+    # counts incoming paths that get cleared-and-rewritten below.
     stale_paths = store.all_source_paths() - incoming_paths
-    paths_deleted = 0
-    for path in stale_paths:
-        store.delete_by_path(path)
-        paths_deleted += 1
+    paths_deleted = len(stale_paths)
 
-    # Clear incoming paths too: a source whose chunk count shrank would
-    # otherwise leave orphaned rows behind, since upsert only replaces by id.
-    for path in incoming_paths:
-        store.delete_by_path(path)
+    # Delete stale paths AND incoming paths, then insert, as one atomic
+    # write: a source whose chunk count shrank would otherwise leave orphaned
+    # rows behind (upsert only replaces by id), and doing the deletes and the
+    # insert in separate transactions is exactly what left the store emptied
+    # when upsert failed after the deletes had already committed.
+    store.replace(
+        stale_paths | incoming_paths,
+        list(chunks),
+        [cached[chunk.content_hash] for chunk in chunks],
+    )
 
     if not chunks:
         return BuildStats(0, 0, 0, paths_deleted)
-
-    store.upsert(list(chunks), [cached[chunk.content_hash] for chunk in chunks])
 
     return BuildStats(
         chunks_written=len(chunks),

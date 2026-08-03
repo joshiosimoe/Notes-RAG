@@ -220,7 +220,7 @@ def test_evaluate_with_no_questions_returns_zero(populated_store):
     assert report.mrr == 0.0
 
 
-def _patch_titan_embedder(monkeypatch):
+def _patch_titan_embedder(monkeypatch, *, dimensions=DIMS):
     # main() imports TitanEmbedder lazily from notes_rag.embed.bedrock inside
     # its own body. Patching the attribute on that module, rather than on
     # eval.run, is what the lazy `from ... import TitanEmbedder` resolves at
@@ -228,14 +228,16 @@ def _patch_titan_embedder(monkeypatch):
     from notes_rag.embed import bedrock as bedrock_module
 
     monkeypatch.setattr(
-        bedrock_module, "TitanEmbedder", lambda *args, **kwargs: FakeEmbedder(dimensions=DIMS)
+        bedrock_module,
+        "TitanEmbedder",
+        lambda *args, **kwargs: FakeEmbedder(dimensions=dimensions),
     )
 
 
-def _write_main_index_and_questions(tmp_path, *, start_seconds):
+def _write_main_index_and_questions(tmp_path, *, start_seconds, dimensions=DIMS):
     db_path = tmp_path / "eval.db"
-    store = SqliteVecStore(db_path, dimensions=DIMS)
-    embedder = FakeEmbedder(dimensions=DIMS)
+    store = SqliteVecStore(db_path, dimensions=dimensions)
+    embedder = FakeEmbedder(dimensions=dimensions)
     chunks = [video_chunk("a", start=1120, text="writing a custom scheduler")]
     store.upsert(chunks, embedder.embed([chunk.text for chunk in chunks]))
     store.close()
@@ -254,10 +256,16 @@ def _write_main_index_and_questions(tmp_path, *, start_seconds):
 
 
 def test_main_returns_nonzero_when_recall_is_below_min_recall(tmp_path, monkeypatch):
-    _patch_titan_embedder(monkeypatch)
+    # main() opens the index with SqliteVecStore(args.index) - no dimensions
+    # override, so it always assumes the real Titan width (1024). The fixture
+    # index must be written at that same width or SqliteVecStore's opening
+    # check (added alongside the atomic replace() fix) correctly rejects it.
+    _patch_titan_embedder(monkeypatch, dimensions=1024)
     # A span that cannot match the chunk's start_seconds=1120 forces a miss,
     # so recall@k is 0.0 - below the 0.5 threshold.
-    db_path, questions_path = _write_main_index_and_questions(tmp_path, start_seconds=(9000, 9999))
+    db_path, questions_path = _write_main_index_and_questions(
+        tmp_path, start_seconds=(9000, 9999), dimensions=1024
+    )
 
     exit_code = run_module.main(
         [
@@ -275,10 +283,14 @@ def test_main_returns_nonzero_when_recall_is_below_min_recall(tmp_path, monkeypa
 
 
 def test_main_returns_zero_when_recall_meets_min_recall(tmp_path, monkeypatch):
-    _patch_titan_embedder(monkeypatch)
+    # See the width comment on the sibling test above: main() always opens
+    # at the default 1024 dimensions, so the fixture index must match.
+    _patch_titan_embedder(monkeypatch, dimensions=1024)
     # A span that matches the chunk's start_seconds=1120 forces a hit, so
     # recall@k is 1.0 - at or above the 0.5 threshold.
-    db_path, questions_path = _write_main_index_and_questions(tmp_path, start_seconds=(1100, 1200))
+    db_path, questions_path = _write_main_index_and_questions(
+        tmp_path, start_seconds=(1100, 1200), dimensions=1024
+    )
 
     exit_code = run_module.main(
         [

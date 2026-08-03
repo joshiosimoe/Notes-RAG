@@ -6,11 +6,13 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "boto3>=1.35",
     "PyYAML>=6.0",
-    "numpy>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+notes-rag-index = "notes_rag.indexer.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

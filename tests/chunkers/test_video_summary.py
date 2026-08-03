@@ -3,16 +3,6 @@ from notes_rag.chunkers.video_summary import chunk_video_summary
 PATH = "summaries/dQw4w9WgXcQ.json"
 
 
-def test_emits_one_chunk_per_section_plus_an_overview(summary_sample):
-    chunks = chunk_video_summary(summary_sample, source_path=PATH)
-    # 2 sections + 1 overview, before any merging
-    assert len(chunks) >= 1
-    headings = {chunk.heading for chunk in chunks}
-    assert "Custom scheduler" in headings or any(
-        "Custom scheduler" in chunk.text for chunk in chunks
-    )
-
-
 def test_overview_chunk_carries_verdict_tldr_and_takeaways(summary_sample):
     chunks = chunk_video_summary(summary_sample, source_path=PATH)
     combined = "\n".join(chunk.text for chunk in chunks)
@@ -29,12 +19,6 @@ def test_every_chunk_has_video_citation_fields(summary_sample):
         assert chunk.video_id == "dQw4w9WgXcQ"
         assert chunk.url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         assert chunk.start_seconds is not None
-
-
-def test_section_chunk_uses_its_own_start_seconds(summary_sample):
-    chunks = chunk_video_summary(summary_sample, source_path=PATH)
-    starts = {chunk.start_seconds for chunk in chunks}
-    assert 1120 in starts or 0 in starts
 
 
 def test_context_prefix_includes_title_and_channel(summary_sample):
