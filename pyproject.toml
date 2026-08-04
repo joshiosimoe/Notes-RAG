@@ -6,6 +6,13 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "boto3>=1.35",
     "PyYAML>=6.0",
+    # The Lambda python3.12 runtime's stdlib sqlite3 is built without
+    # loadable-extension support, so sqlite-vec cannot load there. This bundles
+    # its own SQLite with extensions enabled. Linux-only: it publishes manylinux
+    # wheels but none for macOS/Windows, and the marker keeps installs on those
+    # platforms from falling back to a source build (wheels-only constraint).
+    # Off Linux, store/sqlite_vec.py falls back to the stdlib sqlite3.
+    "pysqlite3-binary>=0.5; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

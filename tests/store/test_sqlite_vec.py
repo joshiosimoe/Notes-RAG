@@ -294,3 +294,25 @@ def test_opening_a_fresh_database_with_any_width_does_not_raise(tmp_path):
         assert store.dimensions == 1024
     finally:
         store.close()
+
+
+def test_the_sqlite_module_backing_the_store_supports_loadable_extensions():
+    """sqlite-vec is a loadable extension, so the store is unusable without one.
+
+    AWS Lambda's managed python3.12 runtime builds the stdlib sqlite3 WITHOUT
+    loadable-extension support -- verified against public.ecr.aws/lambda/python:3.12,
+    where `enable_load_extension` is absent from the connection object entirely.
+    store/sqlite_vec.py therefore prefers pysqlite3-binary, which bundles its own
+    SQLite with extensions enabled. This asserts the module actually in use can
+    load extensions, so a runtime that cannot fails here rather than at query time.
+    """
+    from notes_rag.store import sqlite_vec as store_module
+
+    connection = store_module.sqlite3.connect(":memory:")
+    try:
+        assert hasattr(connection, "enable_load_extension"), (
+            f"{store_module.SQLITE_MODULE} cannot load SQLite extensions, "
+            "so sqlite-vec cannot be loaded on this runtime"
+        )
+    finally:
+        connection.close()

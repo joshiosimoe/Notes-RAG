@@ -7,11 +7,24 @@ milliseconds, so no ANN tuning is required.
 
 import json
 import re
-import sqlite3
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import sqlite_vec
+
+try:
+    # AWS Lambda's managed python3.12 runtime ships a stdlib sqlite3 built
+    # without loadable-extension support, so `sqlite_vec.load()` cannot run
+    # there at all -- enable_load_extension does not exist on the connection.
+    # pysqlite3-binary bundles its own SQLite with extensions enabled and is a
+    # drop-in replacement, so prefer it wherever it is installed.
+    import pysqlite3 as sqlite3
+except ImportError:
+    import sqlite3
+
+# Which module actually backs the store. Useful in deployment diagnostics: on a
+# runtime where this reports "sqlite3", loading sqlite-vec may not be possible.
+SQLITE_MODULE = sqlite3.__name__
 
 from notes_rag.models import Chunk
 from notes_rag.store.base import SearchHit
