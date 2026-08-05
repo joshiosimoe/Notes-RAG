@@ -1319,7 +1319,7 @@ def lambda_handler(event, context) -> dict:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/indexer/test_handler.py -v`
-Expected: 15 passed
+Expected: 14 passed
 
 - [ ] **Step 5: Run the whole suite**
 
