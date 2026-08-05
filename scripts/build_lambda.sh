@@ -32,8 +32,13 @@ uv pip install \
 cp -r "$ROOT/src/notes_rag" "$BUILD/notes_rag"
 find "$BUILD" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
-# No `zip` binary on the build host, and Python's zipfile is deterministic
-# because we control the entry order - the same tree produces the same archive.
+# No `zip` binary on the build host, and Python's zipfile lets us make the
+# archive byte-reproducible: fixed entry order plus a pinned date_time/mode
+# per entry, so identical source trees produce identical zip bytes even
+# though `cp -r` stamps notes_rag/ with the current wall-clock mtime on every
+# run. Terraform (Task 7) hashes this zip for source_code_hash - a hash that
+# drifts on every rebuild with no source change would make every `apply`
+# look like a redeploy.
 python3 - "$BUILD" "$ZIP" <<'PY'
 import sys, zipfile
 from pathlib import Path
@@ -42,7 +47,10 @@ build, archive_path = Path(sys.argv[1]), Path(sys.argv[2])
 files = sorted(p for p in build.rglob("*") if p.is_file())
 with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
     for path in files:
-        archive.write(path, path.relative_to(build).as_posix())
+        zi = zipfile.ZipInfo(path.relative_to(build).as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        zi.external_attr = 0o644 << 16
+        archive.writestr(zi, path.read_bytes())
 print(f"packed {len(files)} files")
 PY
 
