@@ -32,9 +32,8 @@ data "aws_iam_policy_document" "indexer" {
 
   statement {
     sid     = "ReadWriteIndexBucket"
-    actions = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+    actions = ["s3:GetObject", "s3:PutObject"]
     resources = [
-      aws_s3_bucket.index.arn,
       "${aws_s3_bucket.index.arn}/*",
     ]
   }
