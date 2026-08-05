@@ -17,12 +17,14 @@ def expected_etag(raw: bytes) -> str:
 
 
 def test_list_objects_returns_keys_and_etags(make_s3):
-    client = make_s3({"summaries/a.json": b"{}", "summaries/b.json": b"{}"})
-    # Both objects have identical content, so they share an ETag - that's
-    # correct and realistic, since a real S3 ETag is a content digest.
+    # Distinct bodies on purpose: if list_objects ever mismatched or swapped
+    # etags between keys (an off-by-one zip, an object taking the wrong
+    # item's ETag), identical bodies would hide the bug behind two equal
+    # expected values. Distinct content means a swap fails this assertion.
+    client = make_s3({"summaries/a.json": b"{}", "summaries/b.json": b'{"x":1}'})
     assert list_objects(client, "bucket", ["summaries/"]) == [
         S3Object(key="summaries/a.json", etag=expected_etag(b"{}")),
-        S3Object(key="summaries/b.json", etag=expected_etag(b"{}")),
+        S3Object(key="summaries/b.json", etag=expected_etag(b'{"x":1}')),
     ]
 
 
