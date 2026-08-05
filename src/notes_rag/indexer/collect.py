@@ -52,7 +52,12 @@ def classify(documents: Sequence[SourceDocument]) -> CollectedDocuments:
         path = document.source_path
 
         if path.endswith(".md"):
-            markdown_notes.append((document.raw.decode("utf-8", errors="replace"), path))
+            try:
+                text = document.raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                skipped.append((path, f"not valid UTF-8: {error}"))
+                continue
+            markdown_notes.append((text, path))
             continue
         if not path.endswith(".json"):
             skipped.append((path, "unhandled file suffix"))

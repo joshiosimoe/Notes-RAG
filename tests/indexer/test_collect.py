@@ -64,6 +64,15 @@ def test_skips_a_file_with_an_unhandled_suffix():
     assert [path for path, _ in collected.skipped] == ["notes/photo.png"]
 
 
+def test_skips_markdown_that_is_not_valid_utf8():
+    collected = classify(
+        [SourceDocument(source_path="notes/bad.md", raw=b"# ok\n\xff\xfe invalid")]
+    )
+    assert collected.markdown_notes == ()
+    assert [path for path, _ in collected.skipped] == ["notes/bad.md"]
+    assert collected.skipped[0][1]
+
+
 def test_every_skip_carries_a_reason():
     collected = classify([doc("summaries/broken.json", b"{not json")])
     assert all(reason for _, reason in collected.skipped)
