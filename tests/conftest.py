@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -46,7 +47,18 @@ class StubS3:
         keys = sorted(k for k in self.objects if k.startswith(prefix))
         start = int(token) if token is not None else 0
         page = keys[start : start + self.page_size]
-        contents = [{"Key": key, "ETag": f'"etag-of-{key}"'} for key in page]
+        # A real S3 ETag is a digest of the object body (MD5 for single-part
+        # uploads), which is the entire reason the manifest can detect a
+        # same-key content change. A key-derived ETag could not represent
+        # that case at all, so this stub hashes the actual bytes instead -
+        # sha256 rather than MD5 because the digest algorithm doesn't matter
+        # for what's under test, and sha256 avoids failing on FIPS-restricted
+        # hosts where MD5 is disabled. The literal double quotes are kept:
+        # the adapter's quote-stripping is tested against them.
+        contents = [
+            {"Key": key, "ETag": f'"{hashlib.sha256(self.objects[key]).hexdigest()}"'}
+            for key in page
+        ]
         truncated = start + self.page_size < len(keys)
         response = {"Contents": contents, "IsTruncated": truncated}
         if truncated:

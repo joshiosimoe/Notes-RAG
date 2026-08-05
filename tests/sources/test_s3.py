@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from notes_rag.sources.s3 import (
@@ -11,11 +12,17 @@ from notes_rag.sources.s3 import (
 )
 
 
+def expected_etag(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
 def test_list_objects_returns_keys_and_etags(make_s3):
     client = make_s3({"summaries/a.json": b"{}", "summaries/b.json": b"{}"})
+    # Both objects have identical content, so they share an ETag - that's
+    # correct and realistic, since a real S3 ETag is a content digest.
     assert list_objects(client, "bucket", ["summaries/"]) == [
-        S3Object(key="summaries/a.json", etag="etag-of-summaries/a.json"),
-        S3Object(key="summaries/b.json", etag="etag-of-summaries/b.json"),
+        S3Object(key="summaries/a.json", etag=expected_etag(b"{}")),
+        S3Object(key="summaries/b.json", etag=expected_etag(b"{}")),
     ]
 
 
