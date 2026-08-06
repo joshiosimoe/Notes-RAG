@@ -20,11 +20,27 @@ from notes_rag.models import Chunk
 
 Skip = tuple[str, str]
 
+SUPPORTED_SUFFIXES = (".md", ".json")
+
 
 @dataclass(frozen=True)
 class SourceDocument:
     source_path: str
     raw: bytes
+
+
+def unsupported_suffix_skip(path: str) -> Skip | None:
+    """A Skip for `path` if its suffix isn't one this module reads, else None.
+
+    Decided from the path alone - no bytes involved - so a caller can skip an
+    object before fetching its content. Reading every listed object's bytes
+    just to learn its suffix is unsupported is what let one oversized non-JSON
+    object under a watched prefix take down the indexer with a MemoryError
+    before anything was ever written back, wedging the schedule permanently.
+    """
+    if path.endswith(SUPPORTED_SUFFIXES):
+        return None
+    return (path, "unhandled file suffix")
 
 
 @dataclass(frozen=True)
@@ -51,6 +67,11 @@ def classify(documents: Sequence[SourceDocument]) -> CollectedDocuments:
     for document in documents:
         path = document.source_path
 
+        suffix_skip = unsupported_suffix_skip(path)
+        if suffix_skip is not None:
+            skipped.append(suffix_skip)
+            continue
+
         if path.endswith(".md"):
             try:
                 text = document.raw.decode("utf-8")
@@ -58,9 +79,6 @@ def classify(documents: Sequence[SourceDocument]) -> CollectedDocuments:
                 skipped.append((path, f"not valid UTF-8: {error}"))
                 continue
             markdown_notes.append((text, path))
-            continue
-        if not path.endswith(".json"):
-            skipped.append((path, "unhandled file suffix"))
             continue
 
         try:

@@ -16,21 +16,39 @@ from pathlib import Path
 from notes_rag.embed.base import Embedder
 from notes_rag.embed.fake import FakeEmbedder
 from notes_rag.indexer.build import BuildStats, build_index, derive_backlinks
-from notes_rag.indexer.collect import SourceDocument, build_chunks, classify
+from notes_rag.indexer.collect import (
+    Skip,
+    SourceDocument,
+    build_chunks,
+    classify,
+    unsupported_suffix_skip,
+)
 from notes_rag.store.sqlite_vec import SqliteVecStore
 
 
-def _read_documents(source: Path) -> list[SourceDocument]:
-    """Every file under `source`, as SourceDocuments with source-relative paths.
+def _read_documents(source: Path) -> tuple[list[SourceDocument], list[Skip]]:
+    """Every file under `source`, as SourceDocuments with source-relative paths,
+    plus the skips for files whose suffix nothing here reads.
 
     `source_path` is posix-separated because it ends up in `Chunk.source_path`,
     which must match the S3 key layout the indexer Lambda produces.
+
+    The suffix is decided from the relative path alone, before `read_bytes()`
+    runs, so an unsupported file is never loaded into memory just to find out
+    it will be skipped - mirrors the same guard in the Lambda handler.
     """
-    return [
-        SourceDocument(source_path=path.relative_to(source).as_posix(), raw=path.read_bytes())
-        for path in sorted(source.rglob("*"))
-        if path.is_file()
-    ]
+    documents: list[SourceDocument] = []
+    skipped: list[Skip] = []
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(source).as_posix()
+        skip = unsupported_suffix_skip(rel)
+        if skip is not None:
+            skipped.append(skip)
+            continue
+        documents.append(SourceDocument(source_path=rel, raw=path.read_bytes()))
+    return documents, skipped
 
 
 def _print_stats(stats: BuildStats) -> None:
@@ -62,9 +80,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    collected = classify(_read_documents(Path(args.source)))
+    documents, suffix_skips = _read_documents(Path(args.source))
+    collected = classify(documents)
     chunks, unpairable = build_chunks(collected, vault_id=args.vault_id)
-    for path, reason in collected.skipped + unpairable:
+    for path, reason in [*suffix_skips, *collected.skipped, *unpairable]:
         print(f"skipping {path}: {reason}", file=sys.stderr)
     chunks = derive_backlinks(chunks)
 

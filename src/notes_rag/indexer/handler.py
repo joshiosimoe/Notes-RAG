@@ -19,12 +19,18 @@ from pathlib import Path
 
 from notes_rag.embed.base import Embedder
 from notes_rag.indexer.build import build_index, derive_backlinks
-from notes_rag.indexer.collect import SourceDocument, build_chunks, classify
+from notes_rag.indexer.collect import (
+    SourceDocument,
+    build_chunks,
+    classify,
+    unsupported_suffix_skip,
+)
 from notes_rag.indexer.manifest import Manifest
 from notes_rag.sources.s3 import (
     download_file,
     get_bytes,
     get_json,
+    head_exists,
     list_objects,
     put_json,
     upload_file,
@@ -99,8 +105,34 @@ def run_index(config: IndexerConfig, *, s3, embedder: Embedder) -> IndexerResult
     diff = previous.diff(objects)
 
     if diff.is_empty:
-        logger.info("no source changes; skipping rebuild")
-        return IndexerResult.no_op()
+        # An empty diff alone isn't enough: if an operator deletes full.db to
+        # force a re-embed, or rolls back to an S3 object version that predates
+        # one of the artifacts (a path infra/storage.tf explicitly advertises),
+        # the manifest still matches and every run would return no-op forever,
+        # never restoring what's missing. head_object is ~20ms, so checking
+        # both keys keeps the common no-op path cheap. Only bother when the
+        # manifest actually recorded a prior build - a genuine first run with
+        # zero source objects has no artifacts either, and that is correctly
+        # a no-op, not something to "restore".
+        missing = (
+            [
+                name
+                for name, key in (
+                    ("full.db", config.full_db_key),
+                    ("public.db", config.public_db_key),
+                )
+                if not head_exists(s3, config.index_bucket, key)
+            ]
+            if previous.etags
+            else []
+        )
+        if not missing:
+            logger.info("no source changes; skipping rebuild")
+            return IndexerResult.no_op()
+        logger.warning(
+            "source unchanged but %s missing from the index bucket; rebuilding",
+            " and ".join(missing),
+        )
 
     logger.info("rebuilding: %d changed, %d removed", len(diff.changed), len(diff.removed))
 
@@ -108,20 +140,45 @@ def run_index(config: IndexerConfig, *, s3, embedder: Embedder) -> IndexerResult
     work.mkdir(parents=True, exist_ok=True)
     full_db = work / "full.db"
     public_db = work / "public.db"
-    for stale in (full_db, public_db):
+    # A container Lambda can reuse /tmp across invocations. An invocation
+    # killed mid-write can leave a SQLite side file (-journal, -wal, -shm)
+    # behind for whatever full.db/public.db were on disk at the time; clearing
+    # only the two db files would let the next run's freshly downloaded
+    # full.db open next to a stale hot journal for a different database.
+    for stale in (*work.glob("full.db*"), *work.glob("public.db*")):
         stale.unlink(missing_ok=True)
 
-    # The previous index is the embedding cache. Its absence is fine - the first
-    # run has none, and build_index simply embeds everything.
-    download_file(s3, config.index_bucket, config.full_db_key, full_db)
+    # The previous index is the embedding cache. Its absence is fine on a
+    # genuine first run - build_index simply embeds everything - but if the
+    # manifest says sources were already indexed, a missing full.db means this
+    # rebuild silently re-embeds the whole corpus at full Bedrock cost, with no
+    # trace but vectors_reused: 0.
+    had_previous_index = download_file(s3, config.index_bucket, config.full_db_key, full_db)
+    if not had_previous_index and previous.etags:
+        logger.warning(
+            "no previous index found at %s; the full corpus will be re-embedded",
+            config.full_db_key,
+        )
 
-    documents = [
-        SourceDocument(source_path=obj.key, raw=get_bytes(s3, config.source_bucket, obj.key))
-        for obj in objects
-    ]
+    # Decide from the key alone, before fetching anything: a large object under
+    # a watched prefix with an unsupported suffix must never be pulled into
+    # memory just to discover that. That is what let one such object wedge the
+    # index permanently - MemoryError before put_json, so the manifest never
+    # advances and the next tick lists and dies on the same object forever.
+    suffix_skips = []
+    documents = []
+    for obj in objects:
+        skip = unsupported_suffix_skip(obj.key)
+        if skip is not None:
+            suffix_skips.append(skip)
+            continue
+        documents.append(
+            SourceDocument(source_path=obj.key, raw=get_bytes(s3, config.source_bucket, obj.key))
+        )
+
     collected = classify(documents)
     chunks, unpairable = build_chunks(collected, vault_id=config.vault_id)
-    for path, reason in collected.skipped + unpairable:
+    for path, reason in [*suffix_skips, *collected.skipped, *unpairable]:
         logger.warning("skipping %s: %s", path, reason)
 
     chunks = derive_backlinks(chunks)

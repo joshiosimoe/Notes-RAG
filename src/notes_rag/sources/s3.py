@@ -54,6 +54,25 @@ def get_bytes(client, bucket: str, key: str) -> bytes:
     return client.get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
+def head_exists(client, bucket: str, key: str) -> bool:
+    """Whether `key` exists in `bucket`, checked with HEAD (no body transfer).
+
+    Unlike get_object, S3's HEAD response for a missing key carries no XML
+    error body for botocore to map to a modeled shape like NoSuchKey - it is
+    always a bare 404, surfaced as the generic ClientError. A missing key is
+    an expected state here (an artifact deleted to force a re-embed, or a
+    version rollback that drops a newer object) rather than an error; any
+    other error code is re-raised.
+    """
+    try:
+        client.head_object(Bucket=bucket, Key=key)
+    except client.exceptions.ClientError as error:
+        if error.response.get("Error", {}).get("Code") == "404":
+            return False
+        raise
+    return True
+
+
 def get_json(client, bucket: str, key: str) -> dict | None:
     """Parsed JSON at `key`, or None when the key does not exist.
 

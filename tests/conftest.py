@@ -26,16 +26,32 @@ class _NoSuchKey(Exception):
     pass
 
 
+class _ClientError(Exception):
+    """Stand-in for botocore.exceptions.ClientError.
+
+    Real botocore attaches the parsed error body to `.response`; head_object
+    on a missing key has no modeled shape, so the adapter checks
+    `error.response["Error"]["Code"]` the same way it would against a real
+    client.
+    """
+
+    def __init__(self, code: str) -> None:
+        self.response = {"Error": {"Code": code}}
+        super().__init__(code)
+
+
 class StubS3:
     """Minimal stand-in for a boto3 S3 client.
 
-    Only the three calls the adapter makes are implemented. `exceptions.NoSuchKey`
-    mirrors botocore's generated exception class, which the adapter catches by
-    attribute off the client rather than by importing botocore.
+    Only the calls the adapter makes are implemented. `exceptions.NoSuchKey`
+    and `exceptions.ClientError` mirror botocore's generated exception
+    classes, which the adapter catches by attribute off the client rather
+    than by importing botocore.
     """
 
     class exceptions:
         NoSuchKey = _NoSuchKey
+        ClientError = _ClientError
 
     def __init__(self, objects: dict[str, bytes] | None = None, page_size: int = 1000) -> None:
         self.objects = dict(objects or {})
@@ -81,6 +97,12 @@ class StubS3:
 
     def put_object(self, **kwargs):
         self.objects[kwargs["Key"]] = kwargs["Body"]
+        return {}
+
+    def head_object(self, **kwargs):
+        key = kwargs["Key"]
+        if key not in self.objects:
+            raise _ClientError("404")
         return {}
 
 
