@@ -8,7 +8,11 @@ resource "aws_lambda_function" "indexer" {
   filename         = var.lambda_zip
   source_code_hash = filebase64sha256(var.lambda_zip)
 
-  timeout     = 300
+  # 240 < the 300s schedule interval below, on purpose: a scheduled run always
+  # finishes or is killed before the next one fires, so two scheduled runs can
+  # never overlap. Do not raise this without also raising schedule_expression -
+  # the two are coupled.
+  timeout     = 240
   memory_size = 1024
 
   # /tmp holds full.db plus public.db. The spec sizes full.db at ~130MB at 20k
@@ -17,8 +21,14 @@ resource "aws_lambda_function" "indexer" {
     size = 2048
   }
 
-  # Two concurrent runs would race on the index artifact.
-  reserved_concurrent_executions = 1
+  # No reserved_concurrent_executions here: this account's Lambda concurrency
+  # quota is 10, and AWS refuses any reservation that would drop unreserved
+  # capacity below 10 - so no reservation, of any size, is possible on this
+  # account. The no-overlap guarantee this was meant to provide now comes from
+  # timeout (240s) being shorter than the schedule interval (300s) instead.
+  # Residual risk, accepted: an ad hoc `aws lambda invoke` can still land on
+  # top of an in-flight scheduled run - worst case is a lost update that
+  # self-heals on the next tick.
 
   environment {
     variables = {
