@@ -32,8 +32,18 @@ data "aws_iam_policy_document" "indexer" {
 
   statement {
     sid     = "ReadWriteIndexBucket"
-    actions = ["s3:GetObject", "s3:PutObject"]
+    # s3:ListBucket is not here for listing - the handler never lists this
+    # bucket. It is here because, without it, S3 returns 403 AccessDenied
+    # instead of 404 NoSuchKey for a GetObject on a key that doesn't exist,
+    # to avoid revealing whether the key is present. That masking breaks the
+    # first-run path: on a brand-new index bucket neither index/manifest.json
+    # nor index/full.db exists yet, and both get_json and download_file rely
+    # on distinguishing "absent" (proceed as first run) from "denied" (real
+    # error). Do not remove this again on a "the handler never lists this
+    # bucket" argument - that argument is correct and irrelevant.
+    actions = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
     resources = [
+      aws_s3_bucket.index.arn,
       "${aws_s3_bucket.index.arn}/*",
     ]
   }
