@@ -113,3 +113,19 @@ the next one fires, so two scheduled runs can never overlap, and
 behind a failure either. The accepted residual risk is narrower: an ad hoc
 `aws lambda invoke` can still land on top of an in-flight scheduled run, with a
 lost update that self-heals on the next tick as the worst case.
+
+### Syncing the vault
+
+The indexer reads notes from an S3 prefix, not from GitHub. Push a vault with:
+
+```bash
+NOTES_BUCKET=notes-rag-source-<account-id> \
+  ./scripts/sync_vault.sh ~/path/to/vault <vault-id>
+```
+
+`<vault-id>` must match a `vaults` entry in `infra/variables.tf` — it becomes
+the S3 prefix, the chunk's `vault_id`, and part of every note chunk's
+`content_hash`. Changing it later re-embeds the whole note corpus.
+
+The script passes `--delete`, so a note deleted locally leaves the index on the
+next run. Pass `--dryrun` to see what would move first.
