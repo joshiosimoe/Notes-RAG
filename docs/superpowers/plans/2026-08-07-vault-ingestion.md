@@ -1346,6 +1346,46 @@ git commit -m "test: assert the deployed public.db holds no notes"
 - `terraform plan` is clean.
 - Unit and integration suites pass; ruff clean.
 
+## Known deferred items
+
+Raised by per-task reviews, triaged by the whole-branch review as safe to defer.
+None is reachable through Terraform-generated config; all are cosmetic or
+ops-clarity.
+
+- Several tests re-import symbols inside function bodies that are already
+  imported at module scope (came from this plan's own snippets).
+- `SourceSpec.from_dict`'s `payload: Mapping` is unparameterized while
+  `from_env` uses `Mapping[str, str]`.
+- `payload.get("vault_id") or None` coerces an explicit `""` to `None`, which
+  then silently skips that source's markdown rather than erroring. Untested;
+  only reachable by hand-writing `vault_id = ""` into `external_sources`.
+- A `SOURCE_LIST` that parses to valid JSON but not a list of objects raises
+  `AttributeError` rather than a clear `ValueError`. Only reachable via a
+  hand-edited env var — Terraform always emits the right shape.
+- `lambda_handler` constructs `TitanEmbedder` before entering `run_index`, so
+  `handler.py`'s module docstring overstates the no-op path ("returns before
+  … constructing a Bedrock client"). Pre-existing; construction is local and
+  makes no network call.
+- `test_config_rejects_a_missing_required_variable` duplicates
+  `test_from_env_requires_source_list` in `tests/indexer/test_config.py`.
+- `objects` is sorted by `(bucket, key)` for the manifest while `documents`
+  build in source-declaration order. Harmless — both are consumed
+  order-independently — but the sort reads as unexplained.
+- `sync_vault.sh`'s vault-id check rejects only a slash and the empty string;
+  `..`, `--recursive`, and whitespace are accepted as literal S3 key segments.
+  No injection path: the value only ever appears inside a quoted `s3://` URI,
+  never as a standalone argv token.
+- No Terraform `validation` block enforcing the documented trailing-slash rule
+  on `external_sources.prefixes`. Backstopped by `SourceSpec.from_dict`, which
+  rejects a bad prefix at Lambda cold start rather than silently widening the
+  IAM grant.
+
+One finding was fixed rather than deferred: `derive_backlinks` resolved
+wikilinks by bare filename stem, so two vaults each holding a `README.md` would
+cross-link and share one merged backlink set. Dormant at one vault, live the
+moment `var.vaults` gains a second — which is the capability this plan adds.
+Fixed in `25992e6` by keying resolution on `(vault_id, stem)`.
+
 ## Deliberately not in this plan
 
 - Retrieval and generation — Plan 4.
