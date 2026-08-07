@@ -53,7 +53,8 @@ cd ../..
 cd infra
 terraform init -backend-config="bucket=notes-rag-tfstate-<account-id>"
 terraform apply -var="index_bucket=notes-rag-index-<account-id>" \
-                 -var="source_bucket=<your-video-vault-bucket>"
+                 -var="source_bucket=<your-video-vault-bucket>" \
+                 -var="alarm_email=you@example.com"   # optional
 ```
 
 `source_bucket` defaults to the original deployer's own bucket (see
@@ -61,6 +62,14 @@ terraform apply -var="index_bucket=notes-rag-index-<account-id>" \
 indexer's IAM role at a bucket that account does not own. It must be an S3
 bucket holding `summaries/` and `transcripts/` prefixes in the Video Vault
 artifact shape.
+
+`alarm_email` is optional. The `notes-rag-indexer-errors` CloudWatch alarm is
+created either way and covers the only two ways this system fails quietly: two
+consecutive runs that raise, and the schedule not invoking at all. Both leave
+`full.db` serving a corpus that silently stopped growing - queries keep
+answering, so nothing else notices. Without `alarm_email` the alarm has a topic
+but no subscriber, so it fires into the console and nowhere else. With it, AWS
+sends a confirmation email that must be clicked before any alert is delivered.
 
 The indexer then runs every 5 minutes. Trigger one immediately with:
 

@@ -42,6 +42,12 @@ variable "schedule_expression" {
   default     = "rate(5 minutes)"
 }
 
+variable "alarm_email" {
+  type        = string
+  description = "Address subscribed to the indexer alarm topic. Empty (the default) creates no subscription: the alarm still fires and is visible in CloudWatch, it just notifies nobody. A non-empty value sends a confirmation email that must be clicked before anything is delivered."
+  default     = ""
+}
+
 variable "lambda_zip" {
   type        = string
   description = "Path to the deployment package built by scripts/build_lambda.sh."

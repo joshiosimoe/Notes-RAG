@@ -9,3 +9,7 @@ output "indexer_function_name" {
 output "indexer_role_arn" {
   value = aws_iam_role.indexer.arn
 }
+
+output "indexer_alarm_topic_arn" {
+  value = aws_sns_topic.indexer_alarms.arn
+}
