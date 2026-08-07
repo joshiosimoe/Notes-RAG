@@ -53,15 +53,19 @@ cd ../..
 cd infra
 terraform init -backend-config="bucket=notes-rag-tfstate-<account-id>"
 terraform apply -var="index_bucket=notes-rag-index-<account-id>" \
-                 -var="source_bucket=<your-video-vault-bucket>" \
+                 -var="notes_bucket=notes-rag-source-<account-id>" \
                  -var="alarm_email=you@example.com"   # optional
 ```
 
-`source_bucket` defaults to the original deployer's own bucket (see
-`infra/variables.tf`), so a deploy in another account that omits it points the
-indexer's IAM role at a bucket that account does not own. It must be an S3
-bucket holding `summaries/` and `transcripts/` prefixes in the Video Vault
-artifact shape.
+`notes_bucket` is created by this stack and receives the Obsidian vault. It is
+separate from `index_bucket` because the indexer can write to the index bucket,
+and a source its own consumer can overwrite is not a source.
+
+`external_sources` defaults to the original deployer's own Video Vault bucket
+(see `infra/variables.tf`), so a deploy in another account that omits it
+points the indexer's IAM role at a bucket that account does not own. It must
+be an S3 bucket holding `summaries/` and `transcripts/` prefixes in the Video
+Vault artifact shape.
 
 `alarm_email` is optional. The `notes-rag-indexer-errors` CloudWatch alarm is
 created either way and covers the only two ways this system fails quietly: two
