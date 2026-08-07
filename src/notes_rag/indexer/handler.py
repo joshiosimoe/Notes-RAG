@@ -14,7 +14,7 @@ free; the expensive part is embedding, and that stays incremental because
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -130,9 +130,28 @@ class IndexerResult:
         return asdict(self)
 
 
+def _relative_to_prefix(key: str, prefixes: Sequence[str]) -> str:
+    """`key` with its matching source prefix removed.
+
+    Longest match wins, so nested prefixes under one source resolve to the most
+    specific one. A key that matches nothing is returned unchanged rather than
+    guessed at.
+    """
+    matching = [p for p in prefixes if key.startswith(p)]
+    if not matching:
+        return key
+    return key[len(max(matching, key=len)) :]
+
+
 def run_index(config: IndexerConfig, *, s3, embedder: Embedder) -> IndexerResult:
     """List, diff, and rebuild if anything moved. Returns what happened."""
-    objects = list_objects(s3, config.source_bucket, config.source_prefixes)
+    # Listed per source and kept beside the spec that produced it: fetching
+    # needs the bucket, and chunking needs the vault_id.
+    listings = [(source, list_objects(s3, source.bucket, source.prefixes)) for source in config.sources]
+    objects = sorted(
+        (obj for _, found in listings for obj in found),
+        key=lambda obj: (obj.bucket, obj.key),
+    )
     previous = Manifest.from_dict(get_json(s3, config.index_bucket, config.manifest_key))
     diff = previous.diff(objects)
 
@@ -199,17 +218,23 @@ def run_index(config: IndexerConfig, *, s3, embedder: Embedder) -> IndexerResult
     # advances and the next tick lists and dies on the same object forever.
     suffix_skips = []
     documents = []
-    for obj in objects:
-        skip = unsupported_suffix_skip(obj.key)
-        if skip is not None:
-            suffix_skips.append(skip)
-            continue
-        documents.append(
-            SourceDocument(source_path=obj.key, raw=get_bytes(s3, config.source_bucket, obj.key))
-        )
+    for source, found in listings:
+        for obj in found:
+            skip = unsupported_suffix_skip(obj.key)
+            if skip is not None:
+                suffix_skips.append(skip)
+                continue
+            documents.append(
+                SourceDocument(
+                    source_path=obj.key,
+                    raw=get_bytes(s3, obj.bucket, obj.key),
+                    vault_id=source.vault_id,
+                    display_path=_relative_to_prefix(obj.key, source.prefixes),
+                )
+            )
 
     collected = classify(documents)
-    chunks, unpairable = build_chunks(collected, vault_id=config.vault_id)
+    chunks, unpairable = build_chunks(collected)
     for path, reason in [*suffix_skips, *collected.skipped, *unpairable]:
         logger.warning("skipping %s: %s", path, reason)
 
