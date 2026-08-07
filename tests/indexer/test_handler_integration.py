@@ -103,3 +103,45 @@ def test_the_manifest_lists_the_source_objects():
     assert manifest["version"] == 1
     assert all(key.startswith(("summaries/", "transcripts/")) for key in manifest["etags"])
     assert manifest["etags"], "manifest recorded no source objects"
+
+
+def test_public_db_holds_no_notes(tmp_path):
+    """Verify that the public.db artifact contains no note chunks.
+
+    The full/public split is the mechanism protecting unauthenticated endpoints
+    from serving private notes. This test verifies the physical separation is
+    working: a corpus-filter bug would be caught here before the file ships.
+    It also verifies that the vault is being indexed (full.db contains notes
+    while public.db does not).
+    """
+    import sqlite3
+
+    import boto3
+
+    client = boto3.client("s3", region_name=REGION)
+
+    # Download both artifacts
+    full_path = tmp_path / "full.db"
+    public_path = tmp_path / "public.db"
+    client.download_file(INDEX_BUCKET, "index/full.db", str(full_path))
+    client.download_file(INDEX_BUCKET, "index/public.db", str(public_path))
+
+    # Verify full.db contains note chunks (vault is indexed)
+    full_conn = sqlite3.connect(str(full_path))
+    try:
+        full_notes = full_conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE corpus = 'note'"
+        ).fetchone()[0]
+        assert full_notes > 0, "full.db contains no note chunks - vault not indexed"
+    finally:
+        full_conn.close()
+
+    # Verify public.db contains no note chunks
+    public_conn = sqlite3.connect(str(public_path))
+    try:
+        public_notes = public_conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE corpus = 'note'"
+        ).fetchone()[0]
+        assert public_notes == 0, "public.db leaked note chunks"
+    finally:
+        public_conn.close()
