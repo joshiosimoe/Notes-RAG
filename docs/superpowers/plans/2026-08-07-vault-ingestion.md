@@ -1209,7 +1209,32 @@ terraform apply /tmp/vault.tfplan
 
 Expected: apply completes; `notes_bucket` appears in the outputs.
 
-- [ ] **Step 3: Sync the vault**
+- [ ] **Step 2b: Verify the deployed `SOURCE_LIST`**
+
+`SOURCE_LIST` is `(known after apply)` at plan time — `aws_s3_bucket.source.id` does not exist until the bucket does — so this is the first moment its literal value can be checked.
+
+```bash
+aws lambda get-function-configuration --function-name notes-rag-indexer \
+  --region us-east-2 --query 'Environment.Variables.SOURCE_LIST' --output text | python3 -m json.tool
+```
+
+Expected: two entries. The second has `"vault_id": "joshiosimoe"` and `"prefixes": ["notes/joshiosimoe/"]` with the trailing slash intact. The first (the Video Vault source) has `"vault_id": null`, not `""` — an empty string would make `SourceSpec.from_dict` coerce it to `None` and silently skip any markdown under that source.
+
+- [ ] **Step 3: Exercise the sync filter chain on a synthetic vault, then sync the real one**
+
+The real vault has nothing under `.obsidian/` or `.trash/`, so syncing it proves nothing about the `--exclude '*' --include '*.md' --exclude '.obsidian/*' --exclude '.trash/*'` ordering. Build a throwaway tree that hits all four branches first:
+
+```bash
+T=$(mktemp -d)
+mkdir -p "$T/.obsidian" "$T/.trash" "$T/sub"
+touch "$T/top.md" "$T/sub/nested.md" "$T/.obsidian/workspace.md" "$T/.trash/deleted.md" "$T/notes.txt"
+NOTES_BUCKET=notes-rag-source-207423186995 ./scripts/sync_vault.sh "$T" filtertest --dryrun
+rm -rf "$T"
+```
+
+Expected: exactly two `(dryrun) upload:` lines — `top.md` and `sub/nested.md`. Nothing from `.obsidian/` or `.trash/`, and no `notes.txt`. If a `.obsidian/` or `.trash/` path appears, the filter order is wrong and the real sync must not run.
+
+Then the real vault:
 
 ```bash
 NOTES_BUCKET=notes-rag-source-207423186995 \
@@ -1227,6 +1252,8 @@ aws lambda invoke --function-name notes-rag-indexer --region us-east-2 \
 ```
 
 Expected: `{"status": "rebuilt", ...}` with `chunks_written` well above 54 and `vectors_reused` above 0 — the 54 video chunks are unchanged, so their vectors come from cache and only the notes are newly embedded. `vectors_reused: 0` means the manifest key change forced a re-embed of the video corpus too; that is recoverable but worth understanding before moving on.
+
+**Assert on the payload, not on the absence of a crash.** `"status": "no-op"` here is a failure, not a pass: a `SOURCE_LIST` naming a real-but-wrong bucket parses fine, lists nothing, and no-ops forever with no error anywhere. The two conditions that must hold are `status == "rebuilt"` and `chunks_written > 0`.
 
 The manifest key format changed in Task 2, so this first run sees every object as new. That is expected exactly once.
 
