@@ -19,19 +19,36 @@ resource "aws_iam_role_policy_attachment" "indexer_logs" {
 }
 
 data "aws_iam_policy_document" "indexer" {
-  # Read-only on the Video Vault bucket. The indexer must never be able to
-  # modify the corpus it is indexing.
+  # Read-only on the Video Vault bucket, and only the prefixes the handler
+  # actually reads (var.source_prefixes) - not the whole bucket. GetObject and
+  # ListBucket need different resource shapes (object ARNs vs. the bucket
+  # ARN), so they are split into two statements rather than one broad grant.
   statement {
     sid     = "ReadSourceBucket"
-    actions = ["s3:GetObject", "s3:ListBucket"]
+    actions = ["s3:GetObject"]
     resources = [
-      "arn:aws:s3:::${var.source_bucket}",
-      "arn:aws:s3:::${var.source_bucket}/*",
+      for prefix in var.source_prefixes : "arn:aws:s3:::${var.source_bucket}/${prefix}*"
     ]
   }
 
   statement {
-    sid     = "ReadWriteIndexBucket"
+    sid       = "ListSourceBucket"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.source_bucket}"]
+
+    # Without this, ListBucket would still be scoped to the bucket as a
+    # whole - the resource ARN for ListBucket can only ever be the bucket
+    # itself, never an object path. The s3:prefix condition is what actually
+    # confines the *listing* to the watched prefixes.
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = [for prefix in var.source_prefixes : "${prefix}*"]
+    }
+  }
+
+  statement {
+    sid = "ReadWriteIndexBucket"
     # s3:ListBucket is not here for listing - the handler never lists this
     # bucket. It is here because, without it, S3 returns 403 AccessDenied
     # instead of 404 NoSuchKey for a GetObject on a key that doesn't exist,

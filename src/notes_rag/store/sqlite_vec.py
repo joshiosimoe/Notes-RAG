@@ -8,6 +8,7 @@ milliseconds, so no ANN tuning is required.
 import json
 import re
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import sqlite_vec
@@ -298,6 +299,12 @@ class SqliteVecStore:
             ).fetchall()
             for record in rows:
                 chunk = _to_chunk(record[1:-1])
+                # derive_backlinks inverts wikilinks across the whole chunk
+                # set before this filter runs, so a chunk kept here could
+                # still carry a backlink naming a note from a corpus that was
+                # just excluded. backlinks are note *names* - exactly the kind
+                # of private detail this filtered copy exists to keep out.
+                chunk = replace(chunk, backlinks=())
                 target.upsert([chunk], [json.loads(record[-1])])
         finally:
             target.close()

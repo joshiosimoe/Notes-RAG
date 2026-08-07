@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from notes_rag.embed.fake import FakeEmbedder
 from notes_rag.indexer import cli
@@ -150,6 +151,50 @@ def test_cli_reports_build_stats_on_stdout(tmp_path, capsys):
     assert "vectors_embedded:" in out
     assert "vectors_reused:" in out
     assert "paths_deleted:" in out
+
+
+def test_cli_skips_an_unsupported_suffix_file_without_reading_its_bytes(
+    tmp_path, capsys, monkeypatch
+):
+    """Mirrors the same guard in the Lambda handler: the pre-refactor `_collect`
+    only ever read `.md` and `.json` files, but a naive rewrite that walks
+    every file under `source` and calls `read_bytes()` unconditionally would
+    load an arbitrarily large unsupported file into memory just to discover
+    it can't be used. The suffix must be decided from the path alone, before
+    any read."""
+    source = tmp_path / "source"
+    (source / "notes").mkdir(parents=True)
+    unsupported = source / "notes" / "video.mp4"
+    unsupported.write_bytes(b"\x00\x01\x02\x03")
+
+    read_paths: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def recording_read_bytes(self):
+        read_paths.append(self)
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", recording_read_bytes)
+
+    db_path = tmp_path / "index.db"
+    exit_code = cli.main(
+        [
+            str(source),
+            "--out",
+            str(db_path),
+            "--vault-id",
+            "TestVault",
+            "--dimensions",
+            str(DIMS),
+            "--fake-embedder",
+        ]
+    )
+    assert exit_code == 0
+    assert unsupported not in read_paths, "bytes were read for an unsupported suffix"
+
+    err = capsys.readouterr().err
+    assert "video.mp4" in err
+    assert "unhandled file suffix" in err
 
 
 def test_transcript_without_a_matching_summary_is_skipped_not_indexed(tmp_path, capsys):

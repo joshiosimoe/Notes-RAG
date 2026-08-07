@@ -33,10 +33,15 @@ resource "aws_lambda_function" "indexer" {
   environment {
     variables = {
       SOURCE_BUCKET    = var.source_bucket
-      SOURCE_PREFIXES  = "summaries/,transcripts/"
+      SOURCE_PREFIXES  = join(",", var.source_prefixes)
       INDEX_BUCKET     = aws_s3_bucket.index.id
       EMBED_DIMENSIONS = tostring(var.embed_dimensions)
       BEDROCK_REGION   = var.region
+      # Explicit rather than left to the handler's "Vault" fallback: vault_id
+      # is embedded in every markdown chunk's content_hash, so a cloud build
+      # and a local `--vault-id` build of the same notes must agree on this
+      # value or every chunk hash disagrees too.
+      VAULT_ID = var.vault_id
     }
   }
 }

@@ -41,7 +41,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "index" {
 
     noncurrent_version_expiration {
       newer_noncurrent_versions = 1
-      noncurrent_days           = 7
+      # 1 is the minimum AWS accepts alongside newer_noncurrent_versions. This
+      # rule keeps the single newest noncurrent version (for rollback) and
+      # expires every other noncurrent version once it's been noncurrent for
+      # a day. At 7 here, a version was retained for a week after it stopped
+      # being the newest noncurrent one - on a schedule producing one artifact
+      # version per 5-minute tick, that's roughly a week of history, not one
+      # version, contradicting the comment above.
+      noncurrent_days = 1
     }
   }
 }

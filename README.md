@@ -28,7 +28,9 @@ and no AWS credentials.
 
 ```bash
 .venv/bin/pytest                  # unit tests; no credentials needed
-.venv/bin/pytest -m integration   # touches AWS; needs credentials in us-east-2
+.venv/bin/pytest -m integration   # invokes the deployed indexer Lambda directly (three
+                                   # times); needs credentials in us-east-2 and may trigger
+                                   # a real rebuild, including real Bedrock spend
 ```
 
 ## Deployment
@@ -50,8 +52,15 @@ cd ../..
 # 3. Deploy.
 cd infra
 terraform init -backend-config="bucket=notes-rag-tfstate-<account-id>"
-terraform apply -var="index_bucket=notes-rag-index-<account-id>"
+terraform apply -var="index_bucket=notes-rag-index-<account-id>" \
+                 -var="source_bucket=<your-video-vault-bucket>"
 ```
+
+`source_bucket` defaults to the original deployer's own bucket (see
+`infra/variables.tf`), so a deploy in another account that omits it points the
+indexer's IAM role at a bucket that account does not own. It must be an S3
+bucket holding `summaries/` and `transcripts/` prefixes in the Video Vault
+artifact shape.
 
 The indexer then runs every 5 minutes. Trigger one immediately with:
 
@@ -59,6 +68,17 @@ The indexer then runs every 5 minutes. Trigger one immediately with:
 aws lambda invoke --function-name notes-rag-indexer --region us-east-2 \
   --cli-binary-format raw-in-base64-out --payload '{}' /dev/stdout
 ```
+
+To force a full rebuild, delete `index/manifest.json` from the index bucket -
+**not** `index/full.db`. Deleting the manifest makes every source look
+"changed" against an empty manifest, so the handler re-chunks and re-uploads
+everything; it still only re-embeds chunks whose `content_hash` actually
+changed, because `full.db` (the embedding cache) is untouched. Deleting
+`full.db` instead destroys that cache, so the same rebuild re-embeds the
+whole corpus at full Bedrock cost - and even that no longer works as a
+shortcut to force a rebuild, since the handler now notices the artifact is
+missing and restores it from source regardless of whether the manifest still
+matches.
 
 ### Why the bundle ships its own SQLite
 

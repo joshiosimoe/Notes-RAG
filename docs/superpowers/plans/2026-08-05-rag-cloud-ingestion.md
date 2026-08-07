@@ -18,7 +18,7 @@
 - Terraform state uses a **dedicated bucket created by a run-once bootstrap stack with local state**, mirroring the pattern already in `SASE-UARK-Website/infra/bootstrap/`. Native S3 locking (`use_lockfile = true`, Terraform >= 1.10) — no DynamoDB lock table.
 - `reserved_concurrent_executions = 1` on the indexer. Two concurrent runs would race on the index artifact.
 - Conventional commit prefixes (`feat:`, `test:`, `chore:`, `fix:`). Lint (`ruff check` and `ruff format --check` over `src tests eval`) and tests green before every commit.
-- Existing code is **not** to be rewritten. `build_index`, `derive_backlinks`, `SqliteVecStore`, `TitanEmbedder`, and the three chunkers ship as-is. Task 3 is the one refactor, and it is behaviour-preserving.
+- Existing code is **not** to be rewritten. `build_index`, `derive_backlinks`, `SqliteVecStore`, `TitanEmbedder`, and the three chunkers ship as-is. Task 3 is the one refactor; see its "Behaviour changes, deliberate" note for the three specific, approved exceptions to preservation.
 
 ---
 
@@ -600,7 +600,13 @@ git commit -m "feat: add ETag manifest with change detection"
 
 **Why this refactor:** the Lambda needs exactly the shape-dispatch and transcript/summary pairing that `cli.py` already has, but over bytes fetched from S3 rather than files on disk. Copying it would be two implementations of the dedupe and pairing rules. Moving it behind `SourceDocument` lets the CLI read files and the Lambda read S3 objects into the same type.
 
-**Behaviour change, deliberate:** the current code prints skips to stderr from inside the classification logic. The extracted version *returns* skips as `(source_path, reason)` pairs, and the CLI prints them. A library that writes to stderr cannot be tested on what it skipped, and the Lambda needs to log skips rather than print them.
+**Behaviour changes, deliberate — three, not one.** This section originally disclosed only the first; the other two were approved during execution and are recorded here for the historical accuracy of this document, not as a retroactive edit to the plan:
+
+1. The current code prints skips to stderr from inside the classification logic. The extracted version *returns* skips as `(source_path, reason)` pairs, and the CLI prints them. A library that writes to stderr cannot be tested on what it skipped, and the Lambda needs to log skips rather than print them.
+2. The current code calls `json.loads` with no error handling, so malformed JSON raises `json.JSONDecodeError` and crashes the whole CLI run. The extracted `classify` catches it and records `(path, "malformed JSON: ...")` as a skip instead — one bad object must not abort a run that also has good ones, which matters more once the same code runs unattended in the Lambda every 5 minutes.
+3. The current code silently ignores any file whose suffix isn't `.md` or `.json` (`if path.suffix != ".json": continue`, no message). The extracted version reports it as a skip with reason `"unhandled file suffix"`, so the CLI's stderr output now includes files it previously passed over without comment.
+
+Task 3 is still the one refactor in this plan and is otherwise behaviour-preserving; these three are the full list of exceptions, not "the print→return change" alone.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1944,7 +1950,7 @@ aws lambda invoke --function-name notes-rag-indexer \
 
 Expected: `{"status": "rebuilt", "changed": 4, "removed": 0, "chunks_written": 24, "vectors_embedded": 24, "vectors_reused": 0}`
 
-The counts come from the two real videos currently in the bucket: 4 source objects, 24 chunks. If `chunks_written` is 0, the source bucket or prefixes are wrong.
+The counts come from the two real videos in the bucket at plan-writing time: 4 source objects, 24 chunks. **These figures were point-in-time, not wrong:** Video Vault added a third video to the source bucket during execution, so the actual first-run result recorded against the deployed indexer was 6 source objects / 37 chunks (see the 2026-08-05 baseline note in `eval/questions.yaml`). Do not treat a different count as a failure signal by itself - only `chunks_written: 0` (or a count that doesn't track the number of source objects actually in the bucket at invocation time) indicates the source bucket or prefixes are wrong.
 
 - [ ] **Step 3: Invoke again and confirm the no-op path**
 
