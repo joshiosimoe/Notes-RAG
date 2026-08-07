@@ -1,9 +1,9 @@
 """What the previous run saw, so this run can tell whether anything changed.
 
-Pure data - no IO. The manifest maps every source object key to the ETag it had
-when the index was last built. Comparing it to a fresh listing is what lets the
-overwhelmingly common no-op run exit in milliseconds, before downloading the
-index or calling Bedrock.
+Pure data - no IO. The manifest maps every source object, qualified by bucket, to
+the ETag it had when the index was last built. Comparing it to a fresh listing is
+what lets the overwhelmingly common no-op run exit in milliseconds, before
+downloading the index or calling Bedrock.
 """
 
 from collections.abc import Sequence
@@ -35,7 +35,7 @@ class Manifest:
     @classmethod
     def of(cls, objects: Sequence[S3Object]) -> "Manifest":
         """The manifest describing a listing - what gets written after a build."""
-        return cls(etags={obj.key: obj.etag for obj in objects})
+        return cls(etags={obj.qualified_key: obj.etag for obj in objects})
 
     @classmethod
     def from_dict(cls, payload: dict | None) -> "Manifest":
@@ -53,7 +53,7 @@ class Manifest:
         `changed` covers both new keys and keys whose ETag moved - the indexer
         treats them identically. `removed` is what the listing no longer has.
         """
-        current = {obj.key: obj.etag for obj in objects}
+        current = {obj.qualified_key: obj.etag for obj in objects}
         changed = tuple(sorted(k for k, etag in current.items() if self.etags.get(k) != etag))
         removed = tuple(sorted(set(self.etags) - set(current)))
         return ManifestDiff(changed=changed, removed=removed)

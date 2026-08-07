@@ -23,8 +23,8 @@ def test_list_objects_returns_keys_and_etags(make_s3):
     # expected values. Distinct content means a swap fails this assertion.
     client = make_s3({"summaries/a.json": b"{}", "summaries/b.json": b'{"x":1}'})
     assert list_objects(client, "bucket", ["summaries/"]) == [
-        S3Object(key="summaries/a.json", etag=expected_etag(b"{}")),
-        S3Object(key="summaries/b.json", etag=expected_etag(b'{"x":1}')),
+        S3Object(bucket="bucket", key="summaries/a.json", etag=expected_etag(b"{}")),
+        S3Object(bucket="bucket", key="summaries/b.json", etag=expected_etag(b'{"x":1}')),
     ]
 
 
@@ -95,3 +95,12 @@ def test_upload_file_sends_the_file_bytes(tmp_path, make_s3):
     client = make_s3()
     upload_file(client, "bucket", "index/public.db", src)
     assert client.objects["index/public.db"] == b"db-bytes"
+
+
+def test_list_objects_records_the_bucket(make_s3):
+    from notes_rag.sources.s3 import list_objects
+
+    client = make_s3({"summaries/a.json": b"{}"})
+    found = list_objects(client, "video-bucket", ["summaries/"])
+    assert [obj.bucket for obj in found] == ["video-bucket"]
+    assert found[0].qualified_key == "video-bucket/summaries/a.json"

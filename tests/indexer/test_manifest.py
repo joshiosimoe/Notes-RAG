@@ -3,12 +3,12 @@ from notes_rag.sources.s3 import S3Object
 
 
 def obj(key: str, etag: str) -> S3Object:
-    return S3Object(key=key, etag=etag)
+    return S3Object(bucket="default", key=key, etag=etag)
 
 
 def test_empty_manifest_reports_everything_as_changed():
     diff = Manifest.empty().diff([obj("a", "1"), obj("b", "2")])
-    assert diff.changed == ("a", "b")
+    assert diff.changed == ("default/a", "default/b")
     assert diff.removed == ()
 
 
@@ -22,31 +22,31 @@ def test_identical_etags_produce_an_empty_diff():
 
 def test_a_changed_etag_is_reported_as_changed():
     diff = Manifest.of([obj("a", "1")]).diff([obj("a", "2")])
-    assert diff.changed == ("a",)
+    assert diff.changed == ("default/a",)
     assert diff.is_empty is False
 
 
 def test_a_new_key_is_reported_as_changed():
     diff = Manifest.of([obj("a", "1")]).diff([obj("a", "1"), obj("b", "2")])
-    assert diff.changed == ("b",)
+    assert diff.changed == ("default/b",)
 
 
 def test_a_vanished_key_is_reported_as_removed():
     diff = Manifest.of([obj("a", "1"), obj("b", "2")]).diff([obj("a", "1")])
     assert diff.changed == ()
-    assert diff.removed == ("b",)
+    assert diff.removed == ("default/b",)
     assert diff.is_empty is False
 
 
 def test_changed_and_removed_are_both_reported_in_one_diff():
     diff = Manifest.of([obj("a", "1"), obj("b", "2")]).diff([obj("a", "9"), obj("c", "3")])
-    assert diff.changed == ("a", "c")
-    assert diff.removed == ("b",)
+    assert diff.changed == ("default/a", "default/c")
+    assert diff.removed == ("default/b",)
 
 
 def test_diff_against_nothing_reports_every_known_key_removed():
     diff = Manifest.of([obj("a", "1"), obj("b", "2")]).diff([])
-    assert diff.removed == ("a", "b")
+    assert diff.removed == ("default/a", "default/b")
 
 
 def test_empty_manifest_against_empty_listing_is_empty():
@@ -75,3 +75,40 @@ def test_manifest_diff_is_empty_only_when_both_lists_are_empty():
     assert ManifestDiff(changed=(), removed=()).is_empty is True
     assert ManifestDiff(changed=("a",), removed=()).is_empty is False
     assert ManifestDiff(changed=(), removed=("a",)).is_empty is False
+
+
+def test_manifest_keys_are_bucket_qualified():
+    from notes_rag.indexer.manifest import Manifest
+    from notes_rag.sources.s3 import S3Object
+
+    manifest = Manifest.of(
+        [
+            S3Object(bucket="video", key="summaries/a.json", etag="e1"),
+            S3Object(bucket="notes", key="notes/josh/a.json", etag="e2"),
+        ]
+    )
+    assert manifest.etags == {
+        "video/summaries/a.json": "e1",
+        "notes/notes/josh/a.json": "e2",
+    }
+
+
+def test_same_key_in_two_buckets_is_two_entries():
+    # Without qualification these collide, and a change to one silently masks
+    # the other: the manifest would report no diff and the index would never
+    # pick the change up.
+    from notes_rag.indexer.manifest import Manifest
+    from notes_rag.sources.s3 import S3Object
+
+    objects = [
+        S3Object(bucket="a", key="shared.json", etag="e1"),
+        S3Object(bucket="b", key="shared.json", etag="e2"),
+    ]
+    manifest = Manifest.of(objects)
+    assert len(manifest.etags) == 2
+
+    moved = [
+        S3Object(bucket="a", key="shared.json", etag="e1"),
+        S3Object(bucket="b", key="shared.json", etag="CHANGED"),
+    ]
+    assert manifest.diff(moved).changed == ("b/shared.json",)
