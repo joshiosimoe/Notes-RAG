@@ -5,19 +5,123 @@
 # it exists to measure. A retrieved chunk counts as a hit when its
 # start_seconds falls inside the expected range, or its source_path matches.
 #
-# Replace the placeholder video_id and spans below with values read off the two
-# real artifacts in the Video Vault bucket before running this for real.
+# Spans below are exact section starts read off the two real Video Vault
+# artifacts, so a hit requires retrieving that section itself, not a neighbour.
+#
+# Known limitation: 15 questions over 2 videos moves recall@k in ~6.7%
+# increments. Treat this as a regression tripwire, not a measurement. The
+# questions are also derived from section titles, and each chunk's context
+# prefix contains its section title - so this is closer to a lookup task than
+# a hard retrieval test, and scores here read high. Add questions phrased the
+# way a user would actually ask before drawing conclusions from the number.
+#
+# Baseline 2026-08-04 (Titan v2 @ 1024 dims, k=6): recall@6 1.000, MRR 0.967.
+
+# --- UBFHTHUs1wA: "Anthropic Engineers Just Fixed Claude Code..." (580s) ---
 
 - id: q001
-  question: How does a custom Kubernetes scheduler get registered?
+  question: What does the /doctor slash command do?
   expects:
     - corpus: video
-      video_id: REPLACE_WITH_REAL_VIDEO_ID
-      start_seconds: [1120, 1400]
+      video_id: UBFHTHUs1wA
+      start_seconds: [127, 127]
 
 - id: q002
-  question: What are the two phases of Kubernetes scheduling?
+  question: What are the nine things /doctor checks?
   expects:
     - corpus: video
-      video_id: REPLACE_WITH_REAL_VIDEO_ID
-      start_seconds: [0, 1120]
+      video_id: UBFHTHUs1wA
+      start_seconds: [173, 173]
+
+- id: q003
+  question: Why are most people prompting wrong?
+  expects:
+    - corpus: video
+      video_id: UBFHTHUs1wA
+      start_seconds: [33, 33]
+
+- id: q004
+  question: What does context engineering actually mean?
+  expects:
+    - corpus: video
+      video_id: UBFHTHUs1wA
+      start_seconds: [65, 65]
+
+- id: q005
+  question: How does progressive disclosure work in practice?
+  expects:
+    - corpus: video
+      video_id: UBFHTHUs1wA
+      start_seconds: [419, 419]
+
+- id: q006
+  question: What were the core lessons from Tariq's article?
+  expects:
+    - corpus: video
+      video_id: UBFHTHUs1wA
+      start_seconds: [300, 300]
+
+- id: q007
+  question: What were the live /doctor results on the presenter's machine?
+  expects:
+    - corpus: video
+      video_id: UBFHTHUs1wA
+      start_seconds: [505, 505]
+
+# --- pcEovm0v4pc: "API vs RAG vs MCP vs A2A Explained in 19 Minutes." (1137s) ---
+
+- id: q008
+  question: What is an API as a baseline contract?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [51, 51]
+
+- id: q009
+  question: How do LLMs break the scripted model?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [90, 90]
+
+- id: q010
+  question: What is the hallucination problem with Atlas?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [163, 163]
+
+- id: q011
+  question: What is retrieval-augmented generation?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [253, 253]
+
+- id: q012
+  question: Why does RAG give context but not capability?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [456, 456]
+
+- id: q013
+  question: What is the Model Context Protocol?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [595, 595]
+
+- id: q014
+  question: What does MCP actually not do?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [765, 765]
+
+- id: q015
+  question: What is the A2A agent-to-agent protocol?
+  expects:
+    - corpus: video
+      video_id: pcEovm0v4pc
+      start_seconds: [876, 876]
