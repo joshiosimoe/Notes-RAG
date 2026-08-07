@@ -11,6 +11,7 @@ free; the expensive part is embedding, and that stays incremental because
 `build_index` reuses any vector whose content_hash is already stored.
 """
 
+import json
 import logging
 import os
 from collections.abc import Mapping
@@ -39,44 +40,75 @@ from notes_rag.store.sqlite_vec import SqliteVecStore
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PREFIXES = ("summaries/", "transcripts/")
+
+@dataclass(frozen=True)
+class SourceSpec:
+    """One bucket and the prefixes within it that the indexer reads.
+
+    `vault_id` is required for sources holding markdown and meaningless for
+    everything else: it becomes `Chunk.vault_id`, which is the only thing an
+    `obsidian://open?vault=` citation can be built from. A markdown document
+    that arrives without one is skipped rather than indexed unlinkably - see
+    build_chunks.
+    """
+
+    bucket: str
+    prefixes: tuple[str, ...]
+    vault_id: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "SourceSpec":
+        bucket = payload.get("bucket")
+        if not bucket:
+            raise ValueError(f"source entry needs a bucket: {payload!r}")
+
+        prefixes = tuple(p for p in (payload.get("prefixes") or ()) if p)
+        if not prefixes:
+            raise ValueError(f"source entry needs at least one prefix: {payload!r}")
+
+        # A prefix without a trailing slash is a real security problem, not a
+        # style nit: Terraform derives the IAM s3:prefix condition from this
+        # list as "${prefix}*", so "notes" would also grant "notes-private/".
+        unslashed = [p for p in prefixes if not p.endswith("/")]
+        if unslashed:
+            raise ValueError(f"source prefixes must end in '/': {unslashed}")
+
+        return cls(bucket=bucket, prefixes=prefixes, vault_id=payload.get("vault_id") or None)
 
 
 @dataclass(frozen=True)
 class IndexerConfig:
-    source_bucket: str
     index_bucket: str
-    source_prefixes: tuple[str, ...] = DEFAULT_PREFIXES
+    sources: tuple[SourceSpec, ...]
     full_db_key: str = "index/full.db"
     public_db_key: str = "index/public.db"
     manifest_key: str = "index/manifest.json"
     dimensions: int = 1024
     bedrock_region: str = "us-east-2"
-    vault_id: str = "Vault"
     work_dir: str = "/tmp"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "IndexerConfig":
         """Build config from environment variables.
 
-        SOURCE_BUCKET and INDEX_BUCKET are required; a missing one raises
-        KeyError at cold start, which is the right time to find out.
+        SOURCE_LIST and INDEX_BUCKET are required; a missing one raises at cold
+        start, which is the right time to find out. SOURCE_LIST is JSON rather
+        than a delimited string because each entry carries three fields, and
+        Terraform can hand it over with jsonencode of the same variable the IAM
+        policy is derived from - so the grant and the code cannot drift.
         """
-        prefixes = env.get("SOURCE_PREFIXES")
+        sources = tuple(SourceSpec.from_dict(item) for item in json.loads(env["SOURCE_LIST"]))
+        if not sources:
+            raise ValueError("SOURCE_LIST must contain at least one source")
+
         return cls(
-            source_bucket=env["SOURCE_BUCKET"],
             index_bucket=env["INDEX_BUCKET"],
-            source_prefixes=(
-                tuple(p.strip() for p in prefixes.split(",") if p.strip())
-                if prefixes
-                else DEFAULT_PREFIXES
-            ),
+            sources=sources,
             full_db_key=env.get("FULL_DB_KEY", "index/full.db"),
             public_db_key=env.get("PUBLIC_DB_KEY", "index/public.db"),
             manifest_key=env.get("MANIFEST_KEY", "index/manifest.json"),
             dimensions=int(env.get("EMBED_DIMENSIONS", "1024")),
             bedrock_region=env.get("BEDROCK_REGION", "us-east-2"),
-            vault_id=env.get("VAULT_ID", "Vault"),
             work_dir=env.get("WORK_DIR", "/tmp"),
         )
 
