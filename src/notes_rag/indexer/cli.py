@@ -26,7 +26,7 @@ from notes_rag.indexer.collect import (
 from notes_rag.store.sqlite_vec import SqliteVecStore
 
 
-def _read_documents(source: Path) -> tuple[list[SourceDocument], list[Skip]]:
+def _read_documents(source: Path, vault_id: str) -> tuple[list[SourceDocument], list[Skip]]:
     """Every file under `source`, as SourceDocuments with source-relative paths,
     plus the skips for files whose suffix nothing here reads.
 
@@ -36,6 +36,9 @@ def _read_documents(source: Path) -> tuple[list[SourceDocument], list[Skip]]:
     The suffix is decided from the relative path alone, before `read_bytes()`
     runs, so an unsupported file is never loaded into memory just to find out
     it will be skipped - mirrors the same guard in the Lambda handler.
+
+    Every document carries the CLI's --vault-id. Locally there is one vault and
+    no S3 prefix, so display_path and source_path are the same value.
     """
     documents: list[SourceDocument] = []
     skipped: list[Skip] = []
@@ -47,7 +50,14 @@ def _read_documents(source: Path) -> tuple[list[SourceDocument], list[Skip]]:
         if skip is not None:
             skipped.append(skip)
             continue
-        documents.append(SourceDocument(source_path=rel, raw=path.read_bytes()))
+        documents.append(
+            SourceDocument(
+                source_path=rel,
+                raw=path.read_bytes(),
+                vault_id=vault_id,
+                display_path=rel,
+            )
+        )
     return documents, skipped
 
 
@@ -80,9 +90,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    documents, suffix_skips = _read_documents(Path(args.source))
+    documents, suffix_skips = _read_documents(Path(args.source), args.vault_id)
     collected = classify(documents)
-    chunks, unpairable = build_chunks(collected, vault_id=args.vault_id)
+    chunks, unpairable = build_chunks(collected)
     for path, reason in [*suffix_skips, *collected.skipped, *unpairable]:
         print(f"skipping {path}: {reason}", file=sys.stderr)
     chunks = derive_backlinks(chunks)

@@ -10,11 +10,11 @@ from notes_rag.store.sqlite_vec import SqliteVecStore
 DIMS = 8
 
 
-def note_chunk(chunk_id: str, path: str, *, text: str, links=()) -> Chunk:
+def note_chunk(chunk_id: str, path: str, *, text: str, links=(), vault_id="V") -> Chunk:
     return Chunk(
         id=chunk_id,
         corpus="note",
-        vault_id="V",
+        vault_id=vault_id,
         source_path=path,
         chunk_type="note",
         title="T",
@@ -258,3 +258,21 @@ def test_derive_backlinks_replaces_existing_backlinks_with_empty_when_nothing_li
     stale = replace(note_chunk("a", "Alpha.md", text="one"), backlinks=("Stale",))
     out = derive_backlinks([stale])
     assert out[0].backlinks == ()
+
+
+def test_derive_backlinks_does_not_resolve_wikilinks_across_vaults():
+    """Two different vaults each contain a README.md - an extremely common
+    filename. A [[README]] link written inside a note in vault A must
+    resolve only to vault A's README, never to vault B's unrelated note that
+    happens to share the same bare stem.
+    """
+    chunks = [
+        note_chunk("linker", "Linker.md", text="one", links=("README",), vault_id="A"),
+        note_chunk("a-readme", "README.md", text="target-a", vault_id="A"),
+        note_chunk("b-readme", "README.md", text="target-b", vault_id="B"),
+    ]
+    out = derive_backlinks(chunks)
+    target_a = next(c for c in out if c.vault_id == "A" and c.source_path == "README.md")
+    target_b = next(c for c in out if c.vault_id == "B" and c.source_path == "README.md")
+    assert target_a.backlinks == ("Linker",)
+    assert target_b.backlinks == ()

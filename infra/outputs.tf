@@ -13,3 +13,7 @@ output "indexer_role_arn" {
 output "indexer_alarm_topic_arn" {
   value = aws_sns_topic.indexer_alarms.arn
 }
+
+output "notes_bucket" {
+  value = aws_s3_bucket.source.id
+}

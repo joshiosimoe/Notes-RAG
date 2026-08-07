@@ -13,8 +13,20 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class S3Object:
+    bucket: str
     key: str
     etag: str
+
+    @property
+    def qualified_key(self) -> str:
+        """The object's identity in the manifest.
+
+        The manifest is one flat map across every source, and two buckets can
+        legitimately hold the same key. Keying on `key` alone would let a
+        change to one mask the other, producing an empty diff and an index that
+        never catches up.
+        """
+        return f"{self.bucket}/{self.key}"
 
 
 def _strip_quotes(etag: str) -> str:
@@ -43,7 +55,13 @@ def list_objects(client, bucket: str, prefixes: Sequence[str]) -> list[S3Object]
             for item in response.get("Contents") or []:
                 if item["Key"].endswith("/"):
                     continue
-                found.append(S3Object(key=item["Key"], etag=_strip_quotes(item["ETag"])))
+                found.append(
+                    S3Object(
+                        bucket=bucket,
+                        key=item["Key"],
+                        etag=_strip_quotes(item["ETag"]),
+                    )
+                )
             if not response.get("IsTruncated"):
                 break
             token = response["NextContinuationToken"]

@@ -11,9 +11,10 @@ free; the expensive part is embedding, and that stays incremental because
 `build_index` reuses any vector whose content_hash is already stored.
 """
 
+import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -39,44 +40,114 @@ from notes_rag.store.sqlite_vec import SqliteVecStore
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PREFIXES = ("summaries/", "transcripts/")
+
+def _first_overlapping_pair(prefixes: Sequence[str]) -> tuple[str, str] | None:
+    """The first pair in `prefixes` where one is a prefix of the other, if any.
+
+    Equal prefixes count: a `str.startswith` comparison of two identical
+    strings is True, so duplicate prefixes are caught by the same check
+    without a separate equality test.
+    """
+    for i, left in enumerate(prefixes):
+        for right in prefixes[i + 1 :]:
+            if left.startswith(right) or right.startswith(left):
+                return (left, right)
+    return None
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    """One bucket and the prefixes within it that the indexer reads.
+
+    `vault_id` is required for sources holding markdown and meaningless for
+    everything else: it becomes `Chunk.vault_id`, which is the only thing an
+    `obsidian://open?vault=` citation can be built from. A markdown document
+    that arrives without one is skipped rather than indexed unlinkably - see
+    build_chunks.
+    """
+
+    bucket: str
+    prefixes: tuple[str, ...]
+    vault_id: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "SourceSpec":
+        bucket = payload.get("bucket")
+        if not bucket:
+            raise ValueError(f"source entry needs a bucket: {payload!r}")
+
+        prefixes = tuple(p for p in (payload.get("prefixes") or ()) if p)
+        if not prefixes:
+            raise ValueError(f"source entry needs at least one prefix: {payload!r}")
+
+        # A prefix without a trailing slash is a real security problem, not a
+        # style nit: Terraform derives the IAM s3:prefix condition from this
+        # list as "${prefix}*", so "notes" would also grant "notes-private/".
+        unslashed = [p for p in prefixes if not p.endswith("/")]
+        if unslashed:
+            raise ValueError(f"source prefixes must end in '/': {unslashed}")
+
+        # Two prefixes where one contains the other list overlapping keys:
+        # list_objects loops prefixes with no dedup, so a key under the
+        # shorter prefix would be listed, fetched, and chunked twice. Chunk
+        # ids derive from the bare source key (see chunk_markdown), and
+        # SqliteVecStore's `id` column is UNIQUE with a plain INSERT and no
+        # ON CONFLICT, so the second write raises IntegrityError before
+        # put_json runs. The manifest never advances, so every following
+        # scheduled run lists the same objects and dies the same way - the
+        # same permanent-wedge class commit 9444fb5 eliminated for oversized
+        # and malformed objects. Rejected here instead, as a loud cold-start
+        # failure rather than a silent production wedge.
+        overlap = _first_overlapping_pair(prefixes)
+        if overlap is not None:
+            raise ValueError(f"source prefixes overlap: {overlap[0]!r} and {overlap[1]!r}")
+
+        return cls(bucket=bucket, prefixes=prefixes, vault_id=payload.get("vault_id") or None)
 
 
 @dataclass(frozen=True)
 class IndexerConfig:
-    source_bucket: str
     index_bucket: str
-    source_prefixes: tuple[str, ...] = DEFAULT_PREFIXES
+    sources: tuple[SourceSpec, ...]
     full_db_key: str = "index/full.db"
     public_db_key: str = "index/public.db"
     manifest_key: str = "index/manifest.json"
     dimensions: int = 1024
     bedrock_region: str = "us-east-2"
-    vault_id: str = "Vault"
     work_dir: str = "/tmp"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "IndexerConfig":
         """Build config from environment variables.
 
-        SOURCE_BUCKET and INDEX_BUCKET are required; a missing one raises
-        KeyError at cold start, which is the right time to find out.
+        SOURCE_LIST and INDEX_BUCKET are required; a missing one raises at cold
+        start, which is the right time to find out. SOURCE_LIST is JSON rather
+        than a delimited string because each entry carries three fields, and
+        Terraform can hand it over with jsonencode of the same variable the IAM
+        policy is derived from - so the grant and the code cannot drift.
         """
-        prefixes = env.get("SOURCE_PREFIXES")
+        sources = tuple(SourceSpec.from_dict(item) for item in json.loads(env["SOURCE_LIST"]))
+        if not sources:
+            raise ValueError("SOURCE_LIST must contain at least one source")
+
+        # The same collision SourceSpec.from_dict guards against within one
+        # source, but across sources: a bucket boundary doesn't stop two
+        # sources' prefixes from listing an overlapping (or identical) set of
+        # keys, and chunk ids are derived from the bare key alone, so the
+        # wedge is identical. This is the only place that sees every source
+        # at once, so it is the only place that can catch this half of it.
+        overlap = _first_overlapping_pair([p for source in sources for p in source.prefixes])
+        if overlap is not None:
+            raise ValueError(f"source prefixes overlap: {overlap[0]!r} and {overlap[1]!r}")
+
         return cls(
-            source_bucket=env["SOURCE_BUCKET"],
             index_bucket=env["INDEX_BUCKET"],
-            source_prefixes=(
-                tuple(p.strip() for p in prefixes.split(",") if p.strip())
-                if prefixes
-                else DEFAULT_PREFIXES
-            ),
+            sources=sources,
             full_db_key=env.get("FULL_DB_KEY", "index/full.db"),
             public_db_key=env.get("PUBLIC_DB_KEY", "index/public.db"),
             manifest_key=env.get("MANIFEST_KEY", "index/manifest.json"),
             dimensions=int(env.get("EMBED_DIMENSIONS", "1024")),
             bedrock_region=env.get("BEDROCK_REGION", "us-east-2"),
-            vault_id=env.get("VAULT_ID", "Vault"),
             work_dir=env.get("WORK_DIR", "/tmp"),
         )
 
@@ -98,9 +169,34 @@ class IndexerResult:
         return asdict(self)
 
 
+def _relative_to_prefix(key: str, prefixes: Sequence[str]) -> str:
+    """`key` with its matching source prefix removed.
+
+    `prefixes` is one source's own `SourceSpec.prefixes`, and
+    `SourceSpec.from_dict` now rejects overlapping prefixes at config load, so
+    for a config built the normal way at most one prefix ever matches. The
+    longest-match tie-break below is defensive, not a supported configuration:
+    a `SourceSpec` built directly rather than through `from_dict` (as some
+    tests do) could still supply overlapping prefixes. A key that matches
+    nothing is returned unchanged rather than guessed at.
+    """
+    matching = [p for p in prefixes if key.startswith(p)]
+    if not matching:
+        return key
+    return key[len(max(matching, key=len)) :]
+
+
 def run_index(config: IndexerConfig, *, s3, embedder: Embedder) -> IndexerResult:
     """List, diff, and rebuild if anything moved. Returns what happened."""
-    objects = list_objects(s3, config.source_bucket, config.source_prefixes)
+    # Listed per source and kept beside the spec that produced it: fetching
+    # needs the bucket, and chunking needs the vault_id.
+    listings = [
+        (source, list_objects(s3, source.bucket, source.prefixes)) for source in config.sources
+    ]
+    objects = sorted(
+        (obj for _, found in listings for obj in found),
+        key=lambda obj: (obj.bucket, obj.key),
+    )
     previous = Manifest.from_dict(get_json(s3, config.index_bucket, config.manifest_key))
     diff = previous.diff(objects)
 
@@ -167,17 +263,23 @@ def run_index(config: IndexerConfig, *, s3, embedder: Embedder) -> IndexerResult
     # advances and the next tick lists and dies on the same object forever.
     suffix_skips = []
     documents = []
-    for obj in objects:
-        skip = unsupported_suffix_skip(obj.key)
-        if skip is not None:
-            suffix_skips.append(skip)
-            continue
-        documents.append(
-            SourceDocument(source_path=obj.key, raw=get_bytes(s3, config.source_bucket, obj.key))
-        )
+    for source, found in listings:
+        for obj in found:
+            skip = unsupported_suffix_skip(obj.key)
+            if skip is not None:
+                suffix_skips.append(skip)
+                continue
+            documents.append(
+                SourceDocument(
+                    source_path=obj.key,
+                    raw=get_bytes(s3, obj.bucket, obj.key),
+                    vault_id=source.vault_id,
+                    display_path=_relative_to_prefix(obj.key, source.prefixes),
+                )
+            )
 
     collected = classify(documents)
-    chunks, unpairable = build_chunks(collected, vault_id=config.vault_id)
+    chunks, unpairable = build_chunks(collected)
     for path, reason in [*suffix_skips, *collected.skipped, *unpairable]:
         logger.warning("skipping %s: %s", path, reason)
 

@@ -27,22 +27,30 @@ def derive_backlinks(chunks: Sequence[Chunk]) -> list[Chunk]:
     """Populate `backlinks` by inverting `links_to` across the whole chunk set.
 
     Wikilinks name a note, not a path, so targets are matched against each
-    source path's stem. Links to notes that do not exist in the corpus are
-    ignored rather than recorded as dangling edges.
+    source path's stem. That stem is only unique *within* a vault - two
+    vaults can both contain a "README.md" - so the lookup and accumulator are
+    keyed on (vault_id, stem), not stem alone. Keying on stem alone would let
+    a link in one vault silently resolve to an unrelated note of the same
+    name in another vault, merging their backlinks with no error or warning.
+    Links to notes that do not exist in the corpus (or vault) are ignored
+    rather than recorded as dangling edges.
     """
-    stems = {PurePosixPath(chunk.source_path).stem for chunk in chunks}
-    inbound: dict[str, set[str]] = {stem: set() for stem in stems}
+    keys = {(chunk.vault_id, PurePosixPath(chunk.source_path).stem) for chunk in chunks}
+    inbound: dict[tuple[str | None, str], set[str]] = {key: set() for key in keys}
 
     for chunk in chunks:
         source_stem = PurePosixPath(chunk.source_path).stem
         for target in chunk.links_to:
-            if target in inbound and target != source_stem:
-                inbound[target].add(source_stem)
+            key = (chunk.vault_id, target)
+            if key in inbound and target != source_stem:
+                inbound[key].add(source_stem)
 
     return [
         replace(
             chunk,
-            backlinks=tuple(sorted(inbound[PurePosixPath(chunk.source_path).stem])),
+            backlinks=tuple(
+                sorted(inbound[(chunk.vault_id, PurePosixPath(chunk.source_path).stem)])
+            ),
         )
         for chunk in chunks
     ]

@@ -53,15 +53,19 @@ cd ../..
 cd infra
 terraform init -backend-config="bucket=notes-rag-tfstate-<account-id>"
 terraform apply -var="index_bucket=notes-rag-index-<account-id>" \
-                 -var="source_bucket=<your-video-vault-bucket>" \
+                 -var="notes_bucket=notes-rag-source-<account-id>" \
                  -var="alarm_email=you@example.com"   # optional
 ```
 
-`source_bucket` defaults to the original deployer's own bucket (see
-`infra/variables.tf`), so a deploy in another account that omits it points the
-indexer's IAM role at a bucket that account does not own. It must be an S3
-bucket holding `summaries/` and `transcripts/` prefixes in the Video Vault
-artifact shape.
+`notes_bucket` is created by this stack and receives the Obsidian vault. It is
+separate from `index_bucket` because the indexer can write to the index bucket,
+and a source its own consumer can overwrite is not a source.
+
+`external_sources` defaults to the original deployer's own Video Vault bucket
+(see `infra/variables.tf`), so a deploy in another account that omits it
+points the indexer's IAM role at a bucket that account does not own. It must
+be an S3 bucket holding `summaries/` and `transcripts/` prefixes in the Video
+Vault artifact shape.
 
 `alarm_email` is optional. The `notes-rag-indexer-errors` CloudWatch alarm is
 created either way and covers the only two ways this system fails quietly: two
@@ -113,3 +117,19 @@ the next one fires, so two scheduled runs can never overlap, and
 behind a failure either. The accepted residual risk is narrower: an ad hoc
 `aws lambda invoke` can still land on top of an in-flight scheduled run, with a
 lost update that self-heals on the next tick as the worst case.
+
+### Syncing the vault
+
+The indexer reads notes from an S3 prefix, not from GitHub. Push a vault with:
+
+```bash
+NOTES_BUCKET=notes-rag-source-<account-id> \
+  ./scripts/sync_vault.sh ~/path/to/vault <vault-id>
+```
+
+`<vault-id>` must match a `vaults` entry in `infra/variables.tf` — it becomes
+the S3 prefix, the chunk's `vault_id`, and part of every note chunk's
+`content_hash`. Changing it later re-embeds the whole note corpus.
+
+The script passes `--delete`, so a note deleted locally leaves the index on the
+next run. Pass `--dryrun` to see what would move first.

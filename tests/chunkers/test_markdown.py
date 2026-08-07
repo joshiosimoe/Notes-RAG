@@ -183,3 +183,33 @@ def test_heading_splitting_produces_distinct_chunks_with_correct_headings():
     assert "FILTERING_PHASE_MARKER_67890" not in scoring_chunk.text, (
         "Scoring chunk shouldn't contain filtering marker"
     )
+
+
+def test_display_path_drives_context_not_source_path():
+    from notes_rag.chunkers.markdown import chunk_markdown
+
+    chunks = chunk_markdown(
+        "# Heading\n\nBody text long enough to survive the normalizer's merge rules. "
+        * 20,
+        source_path="notes/josh/Daily/Monday.md",
+        vault_id="josh",
+        display_path="Daily/Monday.md",
+    )
+    assert chunks
+    # source_path stays the S3 key - build_index deletes by it.
+    assert chunks[0].source_path == "notes/josh/Daily/Monday.md"
+    # ...but the embedded prefix carries the vault-relative path, so the vault
+    # name is not repeated and no S3 prefix ends up inside the vector.
+    assert chunks[0].context.startswith("josh / Daily/Monday.md / ")
+    assert "notes/josh" not in chunks[0].context
+
+
+def test_display_path_defaults_to_source_path():
+    from notes_rag.chunkers.markdown import chunk_markdown
+
+    chunks = chunk_markdown(
+        "# Heading\n\nBody text long enough to survive the normalizer. " * 20,
+        source_path="Daily/Monday.md",
+        vault_id="josh",
+    )
+    assert chunks[0].context.startswith("josh / Daily/Monday.md / ")

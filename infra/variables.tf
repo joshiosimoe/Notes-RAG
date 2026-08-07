@@ -8,22 +8,30 @@ variable "index_bucket" {
   description = "Globally unique name for the bucket holding full.db and public.db."
 }
 
-variable "source_bucket" {
+variable "notes_bucket" {
   type        = string
-  description = "Video Vault content bucket holding summaries/ and transcripts/."
-  default     = "videovaultstack-contentbucket52d4b12c-s0o3jpdq69b4"
+  description = "Globally unique name for the bucket the Obsidian vault syncs into. Separate from index_bucket on purpose: the indexer has write access there, and a source its own consumer can overwrite is not a source."
 }
 
-variable "source_prefixes" {
+variable "vaults" {
   type        = list(string)
-  description = "Key prefixes within source_bucket the indexer reads. Each must end in \"/\". Drives both the IAM grant (scoped to these prefixes only, not the whole bucket) and the handler's SOURCE_PREFIXES env var, so the two cannot drift."
-  default     = ["summaries/", "transcripts/"]
+  description = "Vault ids hosted in notes_bucket under notes/<id>/. Each id becomes the chunk's vault_id and therefore part of every note chunk's content_hash, so renaming one re-embeds that vault's whole corpus."
+  default     = ["joshiosimoe"]
 }
 
-variable "vault_id" {
-  type        = string
-  description = "Vault id embedded in every markdown-derived chunk's context, and therefore its content_hash. Must match the --vault-id used for any local CLI build of the same notes - a mismatch is a 100% cache miss that looks like nothing."
-  default     = "Vault"
+variable "external_sources" {
+  type = list(object({
+    bucket   = string
+    prefixes = list(string)
+    vault_id = optional(string)
+  }))
+  description = "Source buckets this stack does not own. Prefixes must end in \"/\" - they are interpolated as \"<prefix>*\" into the IAM s3:prefix condition, so \"notes\" would also grant \"notes-private/\"."
+  default = [
+    {
+      bucket   = "videovaultstack-contentbucket52d4b12c-s0o3jpdq69b4"
+      prefixes = ["summaries/", "transcripts/"]
+    },
+  ]
 }
 
 variable "embed_model_id" {

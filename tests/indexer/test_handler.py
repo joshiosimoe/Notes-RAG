@@ -3,7 +3,7 @@ import json
 import pytest
 
 from notes_rag.embed.fake import FakeEmbedder
-from notes_rag.indexer.handler import IndexerConfig, IndexerResult, run_index
+from notes_rag.indexer.handler import IndexerConfig, IndexerResult, SourceSpec, run_index
 from notes_rag.store.sqlite_vec import SqliteVecStore
 
 DIMS = 8
@@ -33,17 +33,56 @@ TRANSCRIPT = {
 NOTE_MD = "# A Note\n\nSome private body text nobody outside the vault should see.\n"
 
 
+class _BucketRouter:
+    """Dispatch each call to the StubS3 that owns the named bucket.
+
+    The real client is one object serving every bucket; StubS3 is one object
+    per bucket. This is the seam that makes the multi-source path testable
+    without moto or credentials.
+    """
+
+    def __init__(self, buckets: dict) -> None:
+        self._buckets = buckets
+        # The adapter catches exceptions off the client, so they must be the
+        # same classes every underlying stub raises.
+        self.exceptions = next(iter(buckets.values())).exceptions
+
+    def _for(self, kwargs):
+        bucket = kwargs["Bucket"]
+        try:
+            return self._buckets[bucket]
+        except KeyError:
+            raise AssertionError(f"handler reached for an unconfigured bucket: {bucket}") from None
+
+    def list_objects_v2(self, **kwargs):
+        return self._for(kwargs).list_objects_v2(**kwargs)
+
+    def get_object(self, **kwargs):
+        return self._for(kwargs).get_object(**kwargs)
+
+    def put_object(self, **kwargs):
+        return self._for(kwargs).put_object(**kwargs)
+
+    def head_object(self, **kwargs):
+        return self._for(kwargs).head_object(**kwargs)
+
+
 def config(tmp_path) -> IndexerConfig:
+    # One source, matching what stub_with_sources builds. vault_id is now
+    # mandatory for the markdown under notes/: after per-document vault ids, a
+    # document without one is skipped, and skipping it would leave the corpus
+    # all-video and make test_public_db_contains_only_video_corpus_chunks
+    # tautological again - the exact defect 702fbc9 fixed.
     return IndexerConfig(
-        source_bucket="source",
-        source_prefixes=("summaries/", "transcripts/", "notes/"),
         index_bucket="index",
-        full_db_key="index/full.db",
-        public_db_key="index/public.db",
-        manifest_key="index/manifest.json",
+        sources=(
+            SourceSpec(
+                bucket="source",
+                prefixes=("summaries/", "transcripts/", "notes/"),
+                vault_id="Vault",
+            ),
+        ),
         dimensions=DIMS,
-        bedrock_region="us-east-2",
-        vault_id="V",
         work_dir=str(tmp_path),
     )
 
@@ -170,10 +209,16 @@ def test_manifest_records_every_source_etag(tmp_path, make_s3):
     client = stub_with_sources(make_s3)
     run_index(config(tmp_path), s3=client, embedder=FakeEmbedder(dimensions=DIMS))
     manifest = json.loads(client.objects["index/manifest.json"])
+    # Manifest keys on qualified_key ("bucket/key"), not the bare key - hence
+    # the "source/" prefix on every expected key below. This is a manifest-only
+    # distinction: it lets the manifest tell apart same-key objects in
+    # different buckets, but says nothing about the chunk store, where chunk
+    # ids still derive from the bare key alone (see SourceSpec.from_dict's
+    # overlap check for why that matters).
     assert set(manifest["etags"]) == {
-        "summaries/vid1.json",
-        "transcripts/vid1.json",
-        "notes/a.md",
+        "source/summaries/vid1.json",
+        "source/transcripts/vid1.json",
+        "source/notes/a.md",
     }
 
 
@@ -315,22 +360,27 @@ def test_result_serialises_for_the_lambda_response(tmp_path, make_s3):
 def test_config_reads_every_field_from_the_environment():
     config = IndexerConfig.from_env(
         {
-            "SOURCE_BUCKET": "src",
-            "SOURCE_PREFIXES": "summaries/,transcripts/",
+            "SOURCE_LIST": json.dumps(
+                [{"bucket": "src", "prefixes": ["summaries/", "transcripts/"]}]
+            ),
             "INDEX_BUCKET": "idx",
             "EMBED_DIMENSIONS": "1024",
             "BEDROCK_REGION": "us-east-2",
         }
     )
-    assert config.source_bucket == "src"
-    assert config.source_prefixes == ("summaries/", "transcripts/")
+    assert config.sources == (SourceSpec(bucket="src", prefixes=("summaries/", "transcripts/")),)
     assert config.index_bucket == "idx"
     assert config.dimensions == 1024
+    assert config.bedrock_region == "us-east-2"
 
 
 def test_config_defaults_the_optional_fields():
-    config = IndexerConfig.from_env({"SOURCE_BUCKET": "src", "INDEX_BUCKET": "idx"})
-    assert config.source_prefixes == ("summaries/", "transcripts/")
+    config = IndexerConfig.from_env(
+        {
+            "SOURCE_LIST": json.dumps([{"bucket": "src", "prefixes": ["summaries/"]}]),
+            "INDEX_BUCKET": "idx",
+        }
+    )
     assert config.dimensions == 1024
     assert config.bedrock_region == "us-east-2"
     assert config.full_db_key == "index/full.db"
@@ -350,3 +400,67 @@ def test_indexer_result_no_op_helper_is_all_zeros():
     assert result.chunks_written == 0
     assert result.vectors_embedded == 0
     assert result.vectors_reused == 0
+
+
+def multi_source_config(tmp_path) -> IndexerConfig:
+    return IndexerConfig(
+        index_bucket="index",
+        sources=(
+            SourceSpec(bucket="source", prefixes=("summaries/", "transcripts/")),
+            SourceSpec(bucket="notes", prefixes=("notes/josh/",), vault_id="josh"),
+        ),
+        dimensions=DIMS,
+        work_dir=str(tmp_path),
+    )
+
+
+def two_bucket_router(make_s3):
+    source = make_s3(
+        {
+            "summaries/vid1.json": json.dumps(SUMMARY).encode(),
+            "transcripts/vid1.json": json.dumps(TRANSCRIPT).encode(),
+        }
+    )
+    notes = make_s3({"notes/josh/Deep Note.md": (NOTE_MD + "body " * 200).encode()})
+    return _BucketRouter({"source": source, "notes": notes, "index": make_s3({})})
+
+
+def test_reads_from_every_source_bucket(tmp_path, make_s3):
+    # The stub is per-bucket, so a handler that ignored obj.bucket and always
+    # fetched from the first source would raise NoSuchKey on the note.
+    router = two_bucket_router(make_s3)
+    result = run_index(multi_source_config(tmp_path), s3=router, embedder=FakeEmbedder(DIMS))
+
+    assert result.status == "rebuilt"
+
+    store = SqliteVecStore(tmp_path / "full.db", dimensions=DIMS)
+    try:
+        rows = store._db.execute(
+            "SELECT corpus, vault_id, source_path, context FROM chunks"
+        ).fetchall()
+    finally:
+        store.close()
+
+    assert {row[0] for row in rows} == {"video", "note"}
+
+    note_rows = [row for row in rows if row[0] == "note"]
+    assert note_rows, "the note source produced no chunks"
+    assert all(row[1] == "josh" for row in note_rows)
+    # source_path is the full S3 key...
+    assert all(row[2].startswith("notes/josh/") for row in note_rows)
+    # ...and the embedded context is vault-relative: no notes/josh/ inside it.
+    assert all(row[3].startswith("josh / Deep Note.md / ") for row in note_rows)
+    assert all("notes/josh" not in row[3] for row in note_rows)
+
+
+def test_public_db_excludes_notes_from_a_second_bucket(tmp_path, make_s3):
+    router = two_bucket_router(make_s3)
+    run_index(multi_source_config(tmp_path), s3=router, embedder=FakeEmbedder(DIMS))
+
+    store = SqliteVecStore(tmp_path / "public.db", dimensions=DIMS)
+    try:
+        corpora = {row[0] for row in store._db.execute("SELECT corpus FROM chunks")}
+    finally:
+        store.close()
+
+    assert corpora == {"video"}

@@ -40,7 +40,7 @@ def test_classifies_a_transcript_by_its_segments_list():
 
 def test_classifies_markdown_by_suffix():
     collected = classify([SourceDocument(source_path="notes/a.md", raw=b"# hi")])
-    assert [path for _, path in collected.markdown_notes] == ["notes/a.md"]
+    assert [document.source_path for _, document in collected.markdown_notes] == ["notes/a.md"]
 
 
 def test_skips_json_whose_top_level_is_not_an_object():
@@ -89,7 +89,7 @@ def test_build_chunks_emits_summary_and_transcript_chunks():
     collected = classify(
         [doc("summaries/vid1.json", SUMMARY), doc("transcripts/vid1.json", TRANSCRIPT)]
     )
-    chunks, skipped = build_chunks(collected, vault_id="V")
+    chunks, skipped = build_chunks(collected)
     assert skipped == ()
     assert {chunk.chunk_type for chunk in chunks} == {"summary", "transcript"}
     assert all(chunk.video_id == "vid1" for chunk in chunks)
@@ -104,7 +104,7 @@ def test_build_chunks_pairs_a_transcript_with_its_summary_by_video_id():
             doc("transcripts/vid2.json", dict(TRANSCRIPT, video_id="vid2")),
         ]
     )
-    chunks, _ = build_chunks(collected, vault_id="V")
+    chunks, _ = build_chunks(collected)
     transcript_chunks = [c for c in chunks if c.chunk_type == "transcript"]
     assert transcript_chunks
     assert all(c.video_id == "vid2" for c in transcript_chunks)
@@ -112,13 +112,53 @@ def test_build_chunks_pairs_a_transcript_with_its_summary_by_video_id():
 
 def test_build_chunks_skips_a_transcript_with_no_matching_summary():
     collected = classify([doc("transcripts/orphan.json", dict(TRANSCRIPT, video_id="missing"))])
-    chunks, skipped = build_chunks(collected, vault_id="V")
+    chunks, skipped = build_chunks(collected)
     assert chunks == []
     assert [path for path, _ in skipped] == ["transcripts/orphan.json"]
     assert "summary" in skipped[0][1]
 
 
 def test_build_chunks_applies_vault_id_to_markdown_chunks():
-    collected = classify([SourceDocument(source_path="notes/a.md", raw=b"# hi\n\nbody")])
-    chunks, _ = build_chunks(collected, vault_id="Class Notes")
+    collected = classify(
+        [SourceDocument(source_path="notes/a.md", raw=b"# hi\n\nbody", vault_id="Class Notes")]
+    )
+    chunks, _ = build_chunks(collected)
     assert all(chunk.vault_id == "Class Notes" for chunk in chunks)
+
+
+def test_markdown_without_a_vault_id_is_skipped_not_indexed():
+    # A source list entry that points at markdown but forgets vault_id would
+    # otherwise produce note chunks that no obsidian:// citation can be built
+    # from - unlinkable content that looks fine until someone clicks it.
+    from notes_rag.indexer.collect import SourceDocument, build_chunks, classify
+
+    collected = classify([SourceDocument(source_path="notes/a.md", raw=b"# A\n\nbody\n")])
+    chunks, skipped = build_chunks(collected)
+
+    assert chunks == []
+    assert skipped == (("notes/a.md", "markdown source has no vault_id"),)
+
+
+def test_markdown_uses_its_own_documents_vault_id():
+    from notes_rag.indexer.collect import SourceDocument, build_chunks, classify
+
+    collected = classify(
+        [
+            SourceDocument(
+                source_path="notes/josh/a.md",
+                raw=b"# A\n\n" + b"body text " * 100,
+                vault_id="josh",
+                display_path="a.md",
+            ),
+            SourceDocument(
+                source_path="notes/other/b.md",
+                raw=b"# B\n\n" + b"body text " * 100,
+                vault_id="other",
+                display_path="b.md",
+            ),
+        ]
+    )
+    chunks, skipped = build_chunks(collected)
+
+    assert skipped == ()
+    assert {chunk.vault_id for chunk in chunks} == {"josh", "other"}

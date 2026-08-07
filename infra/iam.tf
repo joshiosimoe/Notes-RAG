@@ -19,31 +19,41 @@ resource "aws_iam_role_policy_attachment" "indexer_logs" {
 }
 
 data "aws_iam_policy_document" "indexer" {
-  # Read-only on the Video Vault bucket, and only the prefixes the handler
-  # actually reads (var.source_prefixes) - not the whole bucket. GetObject and
-  # ListBucket need different resource shapes (object ARNs vs. the bucket
-  # ARN), so they are split into two statements rather than one broad grant.
-  statement {
-    sid     = "ReadSourceBucket"
-    actions = ["s3:GetObject"]
-    resources = [
-      for prefix in var.source_prefixes : "arn:aws:s3:::${var.source_bucket}/${prefix}*"
-    ]
+  # Read-only on each configured source, and only the prefixes the handler
+  # actually reads - not the whole bucket. GetObject and ListBucket need
+  # different resource shapes (object ARNs vs. the bucket ARN), so they are
+  # separate statements. Both are generated from local.all_sources, which is
+  # also what becomes SOURCE_LIST: the grant and the code read one list.
+  dynamic "statement" {
+    for_each = { for index, source in local.all_sources : index => source }
+
+    content {
+      sid     = "ReadSource${statement.key}"
+      actions = ["s3:GetObject"]
+      resources = [
+        for prefix in statement.value.prefixes :
+        "arn:aws:s3:::${statement.value.bucket}/${prefix}*"
+      ]
+    }
   }
 
-  statement {
-    sid       = "ListSourceBucket"
-    actions   = ["s3:ListBucket"]
-    resources = ["arn:aws:s3:::${var.source_bucket}"]
+  dynamic "statement" {
+    for_each = { for index, source in local.all_sources : index => source }
 
-    # Without this, ListBucket would still be scoped to the bucket as a
-    # whole - the resource ARN for ListBucket can only ever be the bucket
-    # itself, never an object path. The s3:prefix condition is what actually
-    # confines the *listing* to the watched prefixes.
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = [for prefix in var.source_prefixes : "${prefix}*"]
+    content {
+      sid       = "ListSource${statement.key}"
+      actions   = ["s3:ListBucket"]
+      resources = ["arn:aws:s3:::${statement.value.bucket}"]
+
+      # Without this, ListBucket would still be scoped to the bucket as a
+      # whole - the resource ARN for ListBucket can only ever be the bucket
+      # itself, never an object path. The s3:prefix condition is what actually
+      # confines the *listing* to the watched prefixes.
+      condition {
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = [for prefix in statement.value.prefixes : "${prefix}*"]
+      }
     }
   }
 

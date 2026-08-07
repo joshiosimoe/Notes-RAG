@@ -28,12 +28,24 @@ def extract_wikilinks(text: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def chunk_markdown(text: str, *, source_path: str, vault_id: str) -> list[Chunk]:
+def chunk_markdown(
+    text: str, *, source_path: str, vault_id: str, display_path: str | None = None
+) -> list[Chunk]:
+    """Chunk one note. `source_path` is the index identity - the full S3 key -
+    while `display_path` is what a reader would call the file inside the vault.
+
+    They differ because the vault is synced under a `notes/<vault_id>/` prefix.
+    The prefix belongs in the index (it makes source paths unique across
+    vaults, and build_index deletes by source_path) and does not belong in the
+    embedded context, where it would repeat the vault name and put an S3
+    implementation detail inside the vector.
+    """
     frontmatter, body = _split_frontmatter(text)
     if not body.strip():
         return []
 
-    title = frontmatter.get("title") or PurePosixPath(source_path).stem
+    display = display_path or source_path
+    title = frontmatter.get("title") or PurePosixPath(display).stem
     links = extract_wikilinks(body)
 
     chunks: list[Chunk] = []
@@ -48,7 +60,7 @@ def chunk_markdown(text: str, *, source_path: str, vault_id: str) -> list[Chunk]
                 chunk_type="note",
                 title=title,
                 heading=heading,
-                context=f"{vault_id} / {source_path} / {label}",
+                context=f"{vault_id} / {display} / {label}",
                 text=section_text,
                 content_hash="",
                 links_to=links,
