@@ -82,6 +82,7 @@ defensive.
 | 26 | **Artifact freshness is checked per invocation with a HEAD on the ETag** | The indexer republishes every five minutes; a warm container that downloaded once serves an arbitrarily stale index for its entire life, with no symptom. A ~20ms HEAD per invocation buys correctness on a request path already spending seconds in Bedrock. |
 | 27 | **Haiku 4.5 request shape: omit `thinking`, omit `effort`, omit sampling parameters** | Omitting `thinking` is how thinking is disabled on this model family; `effort` errors on Haiku 4.5; sampling parameters are legal here but add a knob with no evaluation behind it. Corrects §2.3. |
 | 28 | **Single-turn, non-streaming, k=6** | Restates decision 18 in query terms. k=6 is what the eval baseline (recall@6 1.000, MRR 0.967) was measured at, so changing it silently invalidates the only retrieval number the project has. |
+| 29 | **`AnthropicBedrock` — the legacy `bedrock-runtime` client — over an inference profile, never a bare model id** | Settled by real calls, not docs (§12.1). Haiku 4.5 has **no in-region availability in `us-east-2`**, so the bare `anthropic.claude-haiku-4-5-20251001-v1:0` is rejected outright (`on-demand throughput isn't supported`) — a profile is mandatory, not a preference. `AnthropicBedrockMantle` is the forward-looking client and its endpoint does resolve in `us-east-2`, but every call 403s on `bedrock-mantle:CreateInference`, which this account lacks; the legacy path needs no new IAM action beyond the `bedrock:InvokeModel` the indexer already uses. `global.` works too and is 10% cheaper, but `us.` is chosen for US-only routing and a four-ARN rather than ~thirty-ARN policy, at ~$0.30/month (§10). |
 
 ---
 
@@ -282,6 +283,23 @@ The demo Lambda's role gets `s3:GetObject` on `index/public.db` and nothing else
 in that bucket — decision 5's boundary, unchanged. Both roles get
 `bedrock:InvokeModel` scoped to the embedding and generation model ARNs.
 
+The generation grant is **not** the single-ARN shape `infra/iam.tf` uses for
+Titan. Invoking through an inference profile (decision 29) authorizes against two
+resource types at once, and a policy naming only one of them fails closed:
+
+```
+arn:aws:bedrock:us-east-2:<acct>:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0
+arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0
+arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0
+arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0
+```
+
+The three foundation-model ARNs are the `us.` profile's destination regions as
+published on the model card; note they carry no account id. Choosing `global.`
+instead replaces these with ~30 regional ARNs. This is the part of the profile
+choice that costs maintenance rather than money, and it is why the Terraform
+should derive the list from a variable rather than hardcode it inline.
+
 ---
 
 ## 8. Plan 6 — frontend
@@ -329,21 +347,43 @@ component in the system with no measurement at all.
 ## 10. Cost
 
 Per demo answer, estimated: ~5.5K input tokens (six chunks plus prompt and
-question) and ~400 output. At first-party Haiku 4.5 rates ($1/$5 per MTok) that
-is ~$0.0075. Query embedding via Titan v2 is negligible.
+question) and ~400 output. Query embedding via Titan v2 is negligible.
 
-| Line | Monthly |
-|---|---|
-| Existing indexer, S3, Lambda | ~$0.20 |
-| Generation at a 400-answer cap | ~$3.00 |
-| DynamoDB (2 writes per answer, on demand) | ~$0.00 |
-| API Gateway, CloudFront, Cognito | ~$0.00 — inside free tiers |
-| **Total at the cap** | **~$3.20** |
+Bedrock partner pricing is now verified (§12.2) from the AWS Price List bulk API
+— `AmazonBedrockFoundationModels`, `us-east-2`, effective 2026-07-01. Anthropic
+models are billed through Marketplace, which is why they are absent from the
+`AmazonBedrock` price list and from the rendered pricing page. Rates depend on
+which inference profile is used:
 
-Against the ~$5 ceiling. **Bedrock is partner-priced**, so the per-answer figure
-is derived from first-party rates and must be verified (§12) — the cap variables
-are the control, and they are what make the worst case a number rather than an
-open question.
+| Per MTok | `global.` profile | `us.` geo profile |
+|---|---|---|
+| Input | $1.00 | $1.10 |
+| Output | $5.00 | $5.50 |
+| Cache read | $0.10 | $0.11 |
+| Cache write (5m) | $1.25 | $1.375 |
+| **Per answer** | **$0.0075** | **$0.00825** |
+
+`global.` matches first-party Haiku 4.5 exactly, so the 08-02 estimate was right
+for that profile and 10% low for `us.`.
+
+| Line | Monthly (`global.`) | Monthly (`us.`) |
+|---|---|---|
+| Existing indexer, S3, Lambda | ~$0.20 | ~$0.20 |
+| Generation at a 400-answer cap | ~$3.00 | ~$3.30 |
+| DynamoDB (2 writes per answer, on demand) | ~$0.00 | ~$0.00 |
+| API Gateway, CloudFront, Cognito | ~$0.00 — inside free tiers | ~$0.00 |
+| **Total at the cap** | **~$3.20** | **~$3.50** |
+
+Both clear the ~$5 ceiling, so the profile choice was never a budget question —
+the cap variables remain the control. It was a residency and IAM question, and
+**`us.` is chosen** (decision 29): it routes only to `us-east-1`/`us-east-2`/
+`us-west-2`, keeping vault notes in US regions, and needs four IAM ARNs against
+`global.`'s ~30 — or a wildcard, which would give up the scoping decision 5 and
+§7.4 rely on. The premium is ~$0.30/month at the cap. Both profiles were
+confirmed working from `us-east-2` with a real call.
+
+**Budget at the cap is therefore ~$3.50/month**, and §7.3's cap variables should
+be read against that figure rather than the 08-02 spec's ~$3.20.
 
 ---
 
@@ -367,13 +407,28 @@ open question.
 
 ## 12. Verification required before building
 
-1. **Which Bedrock client this account can reach in `us-east-2`** —
-   `AnthropicBedrockMantle` with `anthropic.claude-haiku-4-5`, or legacy
-   `AnthropicBedrock` with `us.anthropic.claude-haiku-4-5-20251001-v1:0`. One
-   real call each. This decides `generate.py`'s imports and cannot be inferred
-   from documentation.
-2. **Bedrock partner pricing for Haiku 4.5**, which validates §10 and therefore
-   the cap values.
+1. ~~**Which Bedrock client this account can reach in `us-east-2`**~~ —
+   **settled 2026-08-07, decision 29.** Six combinations were called for real
+   against `us-east-2`; exactly two returned an answer:
+
+   | Client | Model id | Result |
+   |---|---|---|
+   | `AnthropicBedrock` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | **200** |
+   | `AnthropicBedrock` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | **200** |
+   | `AnthropicBedrock` | `anthropic.claude-haiku-4-5-20251001-v1:0` | 400 — on-demand throughput unsupported |
+   | `AnthropicBedrock` | `anthropic.claude-haiku-4-5` | 400 — invalid model identifier |
+   | `AnthropicBedrockMantle` | all three id forms | 403 — `bedrock-mantle:CreateInference` denied |
+
+   `ListFoundationModels` corroborates: every Anthropic model in `us-east-2`
+   reports `INFERENCE_PROFILE` as its only supported inference type, and the AWS
+   model card marks `us-east-2` in-region as unsupported for Haiku 4.5.
+   `generate.py` therefore imports `AnthropicBedrock`. The Mantle 403 is an IAM
+   gap rather than an availability one, so this is revisitable — but not for
+   free, and there is no reason to pay for it yet.
+2. ~~**Bedrock partner pricing for Haiku 4.5**~~ — **settled 2026-08-07, §10.**
+   `global.` is $1.00/$5.00 per MTok, `us.` is $1.10/$5.50; the cap arithmetic
+   holds on either. Josh chose `us.` for US-only routing and the smaller IAM
+   surface, at ~$0.30/month more. Budget at the cap moves from ~$3.20 to ~$3.50.
 3. **Cognito free-tier limits** for a single-user app.
 4. **Deployer IAM.** New permissions are needed for DynamoDB, Cognito,
    CloudFront, and API Gateway. The `terraform-deployers` group is at AWS's cap
