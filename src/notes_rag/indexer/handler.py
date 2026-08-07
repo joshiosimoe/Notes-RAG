@@ -41,6 +41,20 @@ from notes_rag.store.sqlite_vec import SqliteVecStore
 logger = logging.getLogger(__name__)
 
 
+def _first_overlapping_pair(prefixes: Sequence[str]) -> tuple[str, str] | None:
+    """The first pair in `prefixes` where one is a prefix of the other, if any.
+
+    Equal prefixes count: a `str.startswith` comparison of two identical
+    strings is True, so duplicate prefixes are caught by the same check
+    without a separate equality test.
+    """
+    for i, left in enumerate(prefixes):
+        for right in prefixes[i + 1 :]:
+            if left.startswith(right) or right.startswith(left):
+                return (left, right)
+    return None
+
+
 @dataclass(frozen=True)
 class SourceSpec:
     """One bucket and the prefixes within it that the indexer reads.
@@ -73,6 +87,21 @@ class SourceSpec:
         if unslashed:
             raise ValueError(f"source prefixes must end in '/': {unslashed}")
 
+        # Two prefixes where one contains the other list overlapping keys:
+        # list_objects loops prefixes with no dedup, so a key under the
+        # shorter prefix would be listed, fetched, and chunked twice. Chunk
+        # ids derive from the bare source key (see chunk_markdown), and
+        # SqliteVecStore's `id` column is UNIQUE with a plain INSERT and no
+        # ON CONFLICT, so the second write raises IntegrityError before
+        # put_json runs. The manifest never advances, so every following
+        # scheduled run lists the same objects and dies the same way - the
+        # same permanent-wedge class commit 9444fb5 eliminated for oversized
+        # and malformed objects. Rejected here instead, as a loud cold-start
+        # failure rather than a silent production wedge.
+        overlap = _first_overlapping_pair(prefixes)
+        if overlap is not None:
+            raise ValueError(f"source prefixes overlap: {overlap[0]!r} and {overlap[1]!r}")
+
         return cls(bucket=bucket, prefixes=prefixes, vault_id=payload.get("vault_id") or None)
 
 
@@ -100,6 +129,16 @@ class IndexerConfig:
         sources = tuple(SourceSpec.from_dict(item) for item in json.loads(env["SOURCE_LIST"]))
         if not sources:
             raise ValueError("SOURCE_LIST must contain at least one source")
+
+        # The same collision SourceSpec.from_dict guards against within one
+        # source, but across sources: a bucket boundary doesn't stop two
+        # sources' prefixes from listing an overlapping (or identical) set of
+        # keys, and chunk ids are derived from the bare key alone, so the
+        # wedge is identical. This is the only place that sees every source
+        # at once, so it is the only place that can catch this half of it.
+        overlap = _first_overlapping_pair([p for source in sources for p in source.prefixes])
+        if overlap is not None:
+            raise ValueError(f"source prefixes overlap: {overlap[0]!r} and {overlap[1]!r}")
 
         return cls(
             index_bucket=env["INDEX_BUCKET"],
@@ -133,9 +172,13 @@ class IndexerResult:
 def _relative_to_prefix(key: str, prefixes: Sequence[str]) -> str:
     """`key` with its matching source prefix removed.
 
-    Longest match wins, so nested prefixes under one source resolve to the most
-    specific one. A key that matches nothing is returned unchanged rather than
-    guessed at.
+    `prefixes` is one source's own `SourceSpec.prefixes`, and
+    `SourceSpec.from_dict` now rejects overlapping prefixes at config load, so
+    for a config built the normal way at most one prefix ever matches. The
+    longest-match tie-break below is defensive, not a supported configuration:
+    a `SourceSpec` built directly rather than through `from_dict` (as some
+    tests do) could still supply overlapping prefixes. A key that matches
+    nothing is returned unchanged rather than guessed at.
     """
     matching = [p for p in prefixes if key.startswith(p)]
     if not matching:
@@ -147,7 +190,9 @@ def run_index(config: IndexerConfig, *, s3, embedder: Embedder) -> IndexerResult
     """List, diff, and rebuild if anything moved. Returns what happened."""
     # Listed per source and kept beside the spec that produced it: fetching
     # needs the bucket, and chunking needs the vault_id.
-    listings = [(source, list_objects(s3, source.bucket, source.prefixes)) for source in config.sources]
+    listings = [
+        (source, list_objects(s3, source.bucket, source.prefixes)) for source in config.sources
+    ]
     objects = sorted(
         (obj for _, found in listings for obj in found),
         key=lambda obj: (obj.bucket, obj.key),

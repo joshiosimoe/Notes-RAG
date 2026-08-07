@@ -209,8 +209,12 @@ def test_manifest_records_every_source_etag(tmp_path, make_s3):
     client = stub_with_sources(make_s3)
     run_index(config(tmp_path), s3=client, embedder=FakeEmbedder(dimensions=DIMS))
     manifest = json.loads(client.objects["index/manifest.json"])
-    # Manifest keys on qualified_key ("bucket/key"), not the bare key, so that
-    # two sources can legitimately share a key without one masking the other.
+    # Manifest keys on qualified_key ("bucket/key"), not the bare key - hence
+    # the "source/" prefix on every expected key below. This is a manifest-only
+    # distinction: it lets the manifest tell apart same-key objects in
+    # different buckets, but says nothing about the chunk store, where chunk
+    # ids still derive from the bare key alone (see SourceSpec.from_dict's
+    # overlap check for why that matters).
     assert set(manifest["etags"]) == {
         "source/summaries/vid1.json",
         "source/transcripts/vid1.json",

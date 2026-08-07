@@ -71,3 +71,58 @@ def test_from_env_rejects_an_empty_source_list():
 def test_from_env_requires_source_list():
     with pytest.raises(KeyError):
         IndexerConfig.from_env({"INDEX_BUCKET": "index"})
+
+
+def test_from_dict_rejects_overlapping_prefixes_within_one_source():
+    # "notes/josh/" lists a subset of what "notes/" already lists.
+    # list_objects loops prefixes with no dedup, so this source would list,
+    # fetch, and chunk every object under notes/josh/ twice - producing two
+    # chunks that share a chunk id and colliding on SqliteVecStore's UNIQUE
+    # id column.
+    with pytest.raises(ValueError, match="overlap"):
+        SourceSpec.from_dict({"bucket": "b", "prefixes": ["notes/", "notes/josh/"]})
+
+
+def test_from_env_rejects_overlapping_prefixes_across_two_sources():
+    with pytest.raises(ValueError, match="overlap"):
+        IndexerConfig.from_env(
+            {
+                "INDEX_BUCKET": "index",
+                "SOURCE_LIST": json.dumps(
+                    [
+                        {"bucket": "video", "prefixes": ["notes/"]},
+                        {"bucket": "notes", "prefixes": ["notes/josh/"], "vault_id": "josh"},
+                    ]
+                ),
+            }
+        )
+
+
+def test_from_env_rejects_identical_prefixes_in_different_buckets():
+    with pytest.raises(ValueError, match="overlap"):
+        IndexerConfig.from_env(
+            {
+                "INDEX_BUCKET": "index",
+                "SOURCE_LIST": json.dumps(
+                    [
+                        {"bucket": "a", "prefixes": ["notes/"]},
+                        {"bucket": "b", "prefixes": ["notes/"]},
+                    ]
+                ),
+            }
+        )
+
+
+def test_from_env_accepts_a_genuinely_disjoint_prefix_list():
+    config = IndexerConfig.from_env(
+        {
+            "INDEX_BUCKET": "index",
+            "SOURCE_LIST": json.dumps(
+                [
+                    {"bucket": "video", "prefixes": ["summaries/", "transcripts/"]},
+                    {"bucket": "notes", "prefixes": ["notes/josh/"], "vault_id": "josh"},
+                ]
+            ),
+        }
+    )
+    assert [s.bucket for s in config.sources] == ["video", "notes"]
