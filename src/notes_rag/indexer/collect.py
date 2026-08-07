@@ -27,6 +27,8 @@ SUPPORTED_SUFFIXES = (".md", ".json")
 class SourceDocument:
     source_path: str
     raw: bytes
+    vault_id: str | None = None
+    display_path: str | None = None
 
 
 def unsupported_suffix_skip(path: str) -> Skip | None:
@@ -47,7 +49,7 @@ def unsupported_suffix_skip(path: str) -> Skip | None:
 class CollectedDocuments:
     summaries: tuple[tuple[dict, str], ...]
     transcripts: tuple[tuple[dict, str], ...]
-    markdown_notes: tuple[tuple[str, str], ...]
+    markdown_notes: tuple[tuple[str, SourceDocument], ...]
     skipped: tuple[Skip, ...]
 
 
@@ -61,7 +63,7 @@ def classify(documents: Sequence[SourceDocument]) -> CollectedDocuments:
     """
     summaries: list[tuple[dict, str]] = []
     transcripts: list[tuple[dict, str]] = []
-    markdown_notes: list[tuple[str, str]] = []
+    markdown_notes: list[tuple[str, SourceDocument]] = []
     skipped: list[Skip] = []
 
     for document in documents:
@@ -78,7 +80,7 @@ def classify(documents: Sequence[SourceDocument]) -> CollectedDocuments:
             except UnicodeDecodeError as error:
                 skipped.append((path, f"not valid UTF-8: {error}"))
                 continue
-            markdown_notes.append((text, path))
+            markdown_notes.append((text, document))
             continue
 
         try:
@@ -104,15 +106,17 @@ def classify(documents: Sequence[SourceDocument]) -> CollectedDocuments:
     )
 
 
-def build_chunks(
-    collected: CollectedDocuments, *, vault_id: str
-) -> tuple[list[Chunk], tuple[Skip, ...]]:
+def build_chunks(collected: CollectedDocuments) -> tuple[list[Chunk], tuple[Skip, ...]]:
     """Chunk everything classified. Returns (chunks, skips from this stage).
 
     The returned skips are only those discovered while chunking - a transcript
-    with no matching summary. `collected.skipped` from classification is the
-    caller's to report; the two are kept separate so a caller can tell a
-    malformed file from an unpairable one.
+    with no matching summary, or a markdown document whose source carried no
+    vault_id. `collected.skipped` from classification is the caller's to
+    report; the two are kept separate so a caller can tell a malformed file
+    from an unusable one.
+
+    There is no run-wide vault_id: the source list can name several vaults, and
+    a video source has none at all, so it travels on each document.
     """
     by_video_id = {summary["video_id"]: summary for summary, _ in collected.summaries}
 
@@ -132,7 +136,17 @@ def build_chunks(
             continue
         chunks.extend(chunk_video_transcript(transcript, summary, source_path=path))
 
-    for text, path in collected.markdown_notes:
-        chunks.extend(chunk_markdown(text, source_path=path, vault_id=vault_id))
+    for text, document in collected.markdown_notes:
+        if document.vault_id is None:
+            skipped.append((document.source_path, "markdown source has no vault_id"))
+            continue
+        chunks.extend(
+            chunk_markdown(
+                text,
+                source_path=document.source_path,
+                vault_id=document.vault_id,
+                display_path=document.display_path,
+            )
+        )
 
     return chunks, tuple(skipped)
