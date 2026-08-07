@@ -15,7 +15,18 @@
 # a hard retrieval test, and scores here read high. Add questions phrased the
 # way a user would actually ask before drawing conclusions from the number.
 #
-# Baseline 2026-08-04 (Titan v2 @ 1024 dims, k=6): recall@6 1.000, MRR 0.967.
+# Baseline 2026-08-04 (Titan v2 @ 1024 dims, k=6, 2-video corpus, local build):
+# recall@6 1.000, MRR 0.967.
+#
+# Baseline 2026-08-05 (Titan v2 @ 1024 dims, k=6, 3-video corpus, cloud-built
+# public.db via the deployed indexer Lambda): recall@6 1.000, MRR 0.967. Video
+# Vault added a third video (gQeRjkb_Hlc) between these two measurements; the
+# golden set below still covers only the original two, so this run measures
+# retrieval over a corpus that includes unqueried content (the third video's
+# chunks were live competitors for every top-k slot and did not displace any
+# expected answer). Numbers are unchanged, which is itself the finding - not
+# assumed, re-measured. Adding questions for the third video is out of scope
+# for now; see plan notes.
 
 # --- UBFHTHUs1wA: "Anthropic Engineers Just Fixed Claude Code..." (580s) ---
 

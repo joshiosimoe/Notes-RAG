@@ -1,0 +1,115 @@
+# Notes RAG
+
+Ask questions across a semester of study material and get answers with citations
+back to the source: for videos, a deep link to the exact timestamp.
+
+Chunkers turn Video Vault summaries and transcripts into `Chunk`s; a shared
+normalizer merges, splits, context-prefixes and hashes them; vectors and metadata
+live together in one `sqlite-vec` file. An indexer Lambda rebuilds that file on a
+schedule, re-embedding only the chunks whose content actually changed.
+
+## Local use
+
+```bash
+uv venv .venv --python python3.12
+uv pip install --python .venv/bin/python -e '.[dev]'
+
+# Build an index from a directory of Video Vault artifacts
+.venv/bin/notes-rag-index ./artifacts --out index.db --vault-id "Class Notes"
+
+# Score retrieval against the golden question set
+.venv/bin/python -m eval.run --index index.db --questions eval/questions.yaml --k 6
+```
+
+Add `--fake-embedder` to either command to run with the deterministic embedder
+and no AWS credentials.
+
+## Tests
+
+```bash
+.venv/bin/pytest                  # unit tests; no credentials needed
+.venv/bin/pytest -m integration   # invokes the deployed indexer Lambda directly (three
+                                   # times); needs credentials in us-east-2 and may trigger
+                                   # a real rebuild, including real Bedrock spend
+```
+
+## Deployment
+
+Requires Terraform >= 1.10 and AWS credentials for `us-east-2`.
+
+```bash
+# 1. Once per account: create the Terraform state bucket.
+cd infra/bootstrap
+terraform init
+terraform apply -var="state_bucket=notes-rag-tfstate-<account-id>"
+cd ../..
+
+# 2. Build the Lambda bundle. Re-run this before ANY apply that should pick up
+#    code changes: Terraform derives source_code_hash from the zip, so skipping
+#    it deploys the previous code with no error and no diff.
+./scripts/build_lambda.sh
+
+# 3. Deploy.
+cd infra
+terraform init -backend-config="bucket=notes-rag-tfstate-<account-id>"
+terraform apply -var="index_bucket=notes-rag-index-<account-id>" \
+                 -var="source_bucket=<your-video-vault-bucket>" \
+                 -var="alarm_email=you@example.com"   # optional
+```
+
+`source_bucket` defaults to the original deployer's own bucket (see
+`infra/variables.tf`), so a deploy in another account that omits it points the
+indexer's IAM role at a bucket that account does not own. It must be an S3
+bucket holding `summaries/` and `transcripts/` prefixes in the Video Vault
+artifact shape.
+
+`alarm_email` is optional. The `notes-rag-indexer-errors` CloudWatch alarm is
+created either way and covers the only two ways this system fails quietly: two
+consecutive runs that raise, and the schedule not invoking at all. Both leave
+`full.db` serving a corpus that silently stopped growing - queries keep
+answering, so nothing else notices. Without `alarm_email` the alarm has a topic
+but no subscriber, so it fires into the console and nowhere else. With it, AWS
+sends a confirmation email that must be clicked before any alert is delivered.
+
+The indexer then runs every 5 minutes. Trigger one immediately with:
+
+```bash
+aws lambda invoke --function-name notes-rag-indexer --region us-east-2 \
+  --cli-binary-format raw-in-base64-out --payload '{}' /dev/stdout
+```
+
+To force a full rebuild, delete `index/manifest.json` from the index bucket -
+**not** `index/full.db`. Deleting the manifest makes every source look
+"changed" against an empty manifest, so the handler re-chunks and re-uploads
+everything; it still only re-embeds chunks whose `content_hash` actually
+changed, because `full.db` (the embedding cache) is untouched. Deleting
+`full.db` instead destroys that cache, so the same rebuild re-embeds the
+whole corpus at full Bedrock cost - and even that no longer works as a
+shortcut to force a rebuild, since the handler now notices the artifact is
+missing and restores it from source regardless of whether the manifest still
+matches.
+
+### Why the bundle ships its own SQLite
+
+AWS Lambda's managed `python3.12` runtime builds the stdlib `sqlite3` **without**
+loadable-extension support, so `sqlite-vec` cannot load through it. The bundle
+includes `pysqlite3-binary`, which carries its own SQLite with extensions
+enabled, and `src/notes_rag/store/sqlite_vec.py` prefers it when present. Dropping
+that dependency breaks the indexer on its first database connection.
+
+### Why the Lambda has no reserved concurrency
+
+`infra/indexer.tf` does not set `reserved_concurrent_executions`. It did
+originally, at `1`, to guarantee two runs never race on the index artifact - but
+that requires an account-level Lambda concurrency quota of at least 11 (AWS
+refuses any reservation that would drop unreserved capacity below 10), and a
+freshly provisioned account's default quota is exactly 10. No reservation, of
+any size, is possible there.
+
+The same guarantee now comes from `timeout = 240` being shorter than the
+5-minute schedule interval: a scheduled run always finishes or is killed before
+the next one fires, so two scheduled runs can never overlap, and
+`maximum_retry_attempts = 0` on the schedule target means nothing queues up
+behind a failure either. The accepted residual risk is narrower: an ad hoc
+`aws lambda invoke` can still land on top of an in-flight scheduled run, with a
+lost update that self-heals on the next tick as the worst case.

@@ -8,7 +8,7 @@ from notes_rag.store.sqlite_vec import SqliteVecStore
 DIMS = 4
 
 
-def make_chunk(chunk_id: str, path: str, *, corpus="video", vault_id=None) -> Chunk:
+def make_chunk(chunk_id: str, path: str, *, corpus="video", vault_id=None, backlinks=()) -> Chunk:
     return Chunk(
         id=chunk_id,
         corpus=corpus,
@@ -23,6 +23,7 @@ def make_chunk(chunk_id: str, path: str, *, corpus="video", vault_id=None) -> Ch
         video_id="vid",
         start_seconds=10,
         url="https://example.com",
+        backlinks=backlinks,
     )
 
 
@@ -192,6 +193,28 @@ def test_copy_filtered_writes_a_video_only_database(store, tmp_path):
     try:
         hits = public.search([1.0, 1.0, 0.0, 0.0], k=10)
         assert {hit.chunk.id for hit in hits} == {"a"}
+    finally:
+        public.close()
+
+
+def test_copy_filtered_clears_backlinks_so_another_corpus_note_name_cannot_leak(store, tmp_path):
+    """derive_backlinks inverts wikilinks across the whole store before the
+    corpus split runs, so a kept chunk's backlinks can name a note from a
+    corpus that was just filtered out. backlinks are note names - exactly the
+    private detail the filtered copy must not carry, even though corpus
+    isolation itself is correct."""
+    store.upsert(
+        [make_chunk("a", "p1.json", corpus="video", backlinks=("A Private Note",))],
+        [[1.0, 0.0, 0.0, 0.0]],
+    )
+    dest = tmp_path / "public.db"
+    store.copy_filtered(dest, corpus="video")
+
+    public = SqliteVecStore(dest, dimensions=DIMS)
+    try:
+        hits = public.search([1.0, 0.0, 0.0, 0.0], k=10)
+        assert len(hits) == 1
+        assert hits[0].chunk.backlinks == ()
     finally:
         public.close()
 
